@@ -1,0 +1,19 @@
+{
+  "name": "pi-selective-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sandbox-first, selectively escalating execution for Pi",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": { "node": ">=22" }
+}
