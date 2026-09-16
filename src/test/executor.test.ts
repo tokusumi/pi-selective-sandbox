@@ -23,10 +23,20 @@ function fixtures(violations: readonly { kind: "filesystem.write"; resource: str
   return { calls, runtime, runner, approvals };
 }
 
-test("sandbox success and ordinary failure never request approval", async () => {
+test("ordinary sandbox failure never requests approval", async () => {
   const f = fixtures();
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]) });
   const output = await executor.execute("git status | cat", "call-1");
+  assert.equal(output.disposition, "sandbox");
+  assert.equal(f.calls.approvals, 0);
+  assert.equal(f.calls.elevated, 0);
+});
+
+test("sandbox success is returned without entering escalation", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
+  f.runner.run = async () => { f.calls.sandbox++; return result(0, "done"); };
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]) });
+  const output = await executor.execute("git status", "call-success");
   assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.approvals, 0);
   assert.equal(f.calls.elevated, 0);
@@ -47,6 +57,17 @@ test("an attributed violation asks, warns about replay, then selectively escalat
   assert.equal(request?.toolCallId, "call-2");
   assert.match(request?.inputDigest ?? "", /^[a-f0-9]{64}$/);
   assert.deepEqual(request?.capabilities, [{ kind: "filesystem.write", resource: "/reports/result.json" }]);
+});
+
+test("post-violation auto policy still requires replay approval", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
+  const executor = new SelectiveSandboxExecutor({
+    runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([], "auto-escalate"), approvals: f.approvals
+  });
+  const output = await executor.execute("echo x >> local.log && cp x /reports/result.json", "call-auto");
+  assert.equal(output.disposition, "elevated");
+  assert.equal(f.calls.approvals, 1);
+  assert.equal(f.calls.elevated, 1);
 });
 
 test("policy can deny a real violation without host execution", async () => {
@@ -79,9 +100,12 @@ test("only pure canonical helpers under an active trusted root are auto-approved
   const helper = join(root, "scripts", "foo.py");
   await writeFile(helper, "print('ok')");
   const authority = { getActiveSkills: async () => [{ id: "demo", root, active: true, trusted: true }] };
+  const documentation = join(root, "README.md");
+  await writeFile(documentation, "not a helper");
   assert.ok(await findTrustedHelper(`python ${helper} --arg x`, authority));
   assert.equal(await findTrustedHelper(`python ${helper} | cat`, authority), undefined);
   const outside = join(tmpdir(), "outside-helper.py");
+  assert.equal(await findTrustedHelper(`bash ${documentation}`, authority), undefined);
   await writeFile(outside, "print('outside')");
   await symlink(outside, join(root, "scripts", "escape.py"));
   assert.equal(await findTrustedHelper(`python ${join(root, "scripts", "escape.py")}`, authority), undefined);

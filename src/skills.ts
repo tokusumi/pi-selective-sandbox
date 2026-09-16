@@ -32,7 +32,7 @@ function helperCandidate(words: readonly string[]): string | undefined {
 
 function isInside(root: string, child: string): boolean {
   const rel = relative(root, child);
-  return rel !== "" && !rel.startsWith("..") && !rel.startsWith("../") && !resolve(root, rel).startsWith("..");
+  return rel !== "" && !rel.startsWith("..") && !rel.startsWith("../");
 }
 
 export async function findTrustedHelper(command: string, authority: SkillAuthority): Promise<ActiveSkill | undefined> {
@@ -45,7 +45,12 @@ export async function findTrustedHelper(command: string, authority: SkillAuthori
     if (!skill.active || !skill.trusted) continue;
     try {
       const root = await realpath(skill.root);
-      if (isInside(root, helper)) return skill;
+      for (const helperRoot of skill.helperRoots ?? ["scripts"]) {
+        const canonicalHelperRoot = await realpath(resolve(root, helperRoot));
+        if (isInside(root, canonicalHelperRoot) && isInside(canonicalHelperRoot, helper)) {
+          return skill;
+        }
+      }
     } catch { /* A missing root is never trusted. */ }
   }
   return undefined;

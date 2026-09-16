@@ -44,10 +44,11 @@ export class SelectiveSandboxExecutor {
 
     const decision = policy.decide(violations, { command, toolCallId });
     if (decision === "deny") return this.finish({ ...first, stderr: `${first.stderr}\nSandbox blocked: ${violations.map(v => `${v.kind}:${v.resource}`).join(", ")}`.trim() }, "denied", violations);
-    if (decision === "ask") {
+    if (decision === "ask" || decision === "auto-escalate") {
       if (!approvals) return this.finish({ ...first, stderr: `${first.stderr}\nSandbox escalation requires interactive approval.`.trim() }, "denied", violations);
       const response = await approvals.request({ toolCallId, toolName, inputDigest: digest(command), capabilities: violations, command, replayWarning: true });
       if (response === "deny") return this.finish(first, "denied", violations);
+      // A generic command may have already changed allowed state. Never silently replay it.
       // Approval is bound to this exact request; callers must create a fresh call for mutations.
     }
     return this.finish(await runner.runElevated(command, violations as readonly Capability[]), "elevated", violations);

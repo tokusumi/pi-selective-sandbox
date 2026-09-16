@@ -31,7 +31,7 @@ export type ApprovalRequest = {
   replayWarning: boolean;
 };
 
-export type ApprovalResponse = "allow-once" | "allow-session" | "deny";
+export type ApprovalResponse = "allow-once" | "deny";
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";
@@ -39,7 +39,7 @@ export type EscalationPolicy = {
   decide(violations: readonly SandboxViolation[], context: { command: string; toolCallId: string }): EscalationDecision;
 };
 
-export type ActiveSkill = { id: string; root: string; trusted: boolean; active: boolean };
+export type ActiveSkill = { id: string; root: string; helperRoots?: readonly string[]; trusted: boolean; active: boolean };
 /** Implemented by pi-skills (or its adapter); this package stores no Skill trust state. */
 export type SkillAuthority = { getActiveSkills(): Promise<readonly ActiveSkill[]> };
 export type Redactor = { redact(text: string): string };
