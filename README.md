@@ -26,6 +26,36 @@ sandbox violation attributed to the specific tool call can enter escalation.
 extension without treating its policy as a suggestion. The package does not
 maintain a parallel Skill trust database or implement its own secret detector.
 
+## Pi integration
+
+This repository provides a Pi extension. Install it with Pi's normal package
+installer, then restart Pi:
+
+```sh
+pi install git:github.com/tokusumi/pi-selective-sandbox
+```
+
+The extension replaces Pi's `bash` tool. It initializes
+`@anthropic-ai/sandbox-runtime` with project and `/tmp` write access, broad
+reads, and GitHub API access for authenticated `gh` use. If initialization
+fails, bash reports the unavailable sandbox and never falls back to host
+execution.
+
+`@spences10/pi-skills` supplies active trusted Skill roots at execution time.
+Only pure helpers below each `scripts/` root receive automatic privileged
+execution. `@spences10/pi-redact` is applied to streamed and returned bash
+output before Pi makes the tool result model-visible.
+
+
+## Current limits
+
+- Bash execution is sandboxed; Pi's `write` and `edit` tools are not yet
+  sandbox-aware and must continue to use their existing tool-layer controls.
+- macOS violation telemetry can drive filesystem approval escalation. On Linux,
+  sandbox enforcement still blocks disallowed filesystem access, but the
+  runtime does not yet provide automatic filesystem-violation telemetry, so
+  those failures are returned normally rather than prompting speculatively.
+
 ## Development
 
 ```sh
