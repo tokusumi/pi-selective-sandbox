@@ -83,6 +83,7 @@ test("outside write denies before native execution and reports canonical metadat
   await assert.rejects(write.execute("w", { path: join(outside, "new", "file.txt"), content: "secret" }, signal, noUpdate));
   assert.equal(calls.length, 0); assert.equal(requests.length, 1);
   assert.equal(requests[0].toolName, "write"); assert.equal(requests[0].replayWarning, false);
+  assert.equal(requests[0].sessionGrantEligible, true);
   assert.equal(requests[0].capabilities[0].kind, "filesystem.write");
   assert.equal(requests[0].capabilities[0].resource, join(await realpath(outside), "new", "file.txt"));
 });

@@ -43,9 +43,10 @@ export async function boundaryAwareTool<T extends MutationInput>(
           inputDigest: inputDigest(params),
           capabilities: [{ kind: "filesystem.write", resource: target.canonical }],
           command: `${toolName} ${target.canonical}`,
-          replayWarning: false
+          replayWarning: false,
+          sessionGrantEligible: true
         });
-        if (decision !== "allow-once") throw new Error(`Permission denied: ${toolName} outside configured writable roots`);
+        if (decision === "deny") throw new Error(`Permission denied: ${toolName} outside configured writable roots`);
       }
       return native.execute(id, params, signal, onUpdate, context);
     }

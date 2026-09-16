@@ -4,7 +4,7 @@ Sandbox-first execution for Pi: normal commands run in an OS sandbox before
 any escalation decision. A non-zero exit code is returned normally; only a
 sandbox violation attributed to the specific tool call can enter escalation.
 
-## Guarantees in this MVP
+## Core guarantees
 
 - Sandboxed success and ordinary failure never prompt for approval.
 - Sandbox unavailability fails closed; there is no implicit host fallback.
@@ -14,6 +14,10 @@ sandbox violation attributed to the specific tool call can enter escalation.
   replay is reserved for future live-widening support.
 - Approval requests include the tool-call ID, command digest, requested
   capabilities, and an explicit replay warning.
+- **Allow once** approves only the exact current operation. **Allow for session**
+  remembers the exact capability/resource for the current Pi session, in memory.
+  It currently applies only to preflight `write`/`edit` mutations; it never grants
+  a parent directory or a different target.
 - Trusted Skill helpers are identified through an injected `pi-skills`
   authority and canonical paths. Only a pure, single helper invocation can
   use configured automatic trusted execution, and only from that Skill's
@@ -45,6 +49,13 @@ execution.
 Only pure helpers below each `scripts/` root receive automatic privileged
 execution. `@spences10/pi-redact` is applied to streamed and returned bash
 output before Pi makes the tool result model-visible. `write` and `edit` are in-process Pi tools, so they use an explicit canonical filesystem boundary instead: mutations in the project or configured `/tmp` root proceed normally; mutations outside those roots require one-time approval before any file-content read, directory creation, or write side effect.
+
+For an outside-root `write` or `edit`, **Allow for session** remembers the exact
+canonical `filesystem.write` target for this Pi session. The same canonical file
+can then be written or edited without another prompt, even if the content or edit
+replacement changes. Generic bash escalation remains one-time because its
+sandboxed attempt may already have produced permitted side effects. Session reuse
+for bash requires future pre-execution/live capability widening.
 
 
 ## Current limits

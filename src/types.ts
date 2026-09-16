@@ -29,9 +29,11 @@ export type ApprovalRequest = {
   capabilities: readonly Capability[];
   command: string;
   replayWarning: boolean;
+  /** The caller has established that this request can be reused before execution. */
+  sessionGrantEligible?: boolean;
 };
 
-export type ApprovalResponse = "allow-once" | "deny";
+export type ApprovalResponse = "allow-once" | "allow-session" | "deny";
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";

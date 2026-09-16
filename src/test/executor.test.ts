@@ -44,7 +44,7 @@ test("sandbox success is returned without entering escalation", async () => {
 
 test("an attributed violation asks, warns about replay, then selectively escalates", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
-  let request: { replayWarning: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
+  let request: { replayWarning: boolean; sessionGrantEligible?: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
   const executor = new SelectiveSandboxExecutor({
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
     approvals: { request: async value => { request = value; return "allow-once"; } }
@@ -54,6 +54,7 @@ test("an attributed violation asks, warns about replay, then selectively escalat
   assert.equal(f.calls.sandbox, 1);
   assert.equal(f.calls.elevated, 1);
   assert.equal(request?.replayWarning, true);
+  assert.equal(request?.sessionGrantEligible, undefined);
   assert.equal(request?.toolCallId, "call-2");
   assert.match(request?.inputDigest ?? "", /^[a-f0-9]{64}$/);
   assert.deepEqual(request?.capabilities, [{ kind: "filesystem.write", resource: "/reports/result.json" }]);
