@@ -86,6 +86,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               redactor: { redact: text => redact_text(text).redacted }
             });
             const output = await executor.execute(command, id);
+            emitExecutorOutput(output, options.onData);
             return { exitCode: output.exitCode };
           }
         }
@@ -94,4 +95,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
       return redactToolResult(output);
     }
   });
+}
+
+export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {
+  if (output.stdout) onData(Buffer.from(output.stdout));
+  if (output.stderr) onData(Buffer.from(output.stderr));
 }

@@ -28,7 +28,7 @@ maintain a parallel Skill trust database or implement its own secret detector.
 
 ## Pi integration
 
-The published package is a Pi extension. Install it with Pi's normal package
+This repository provides a Pi extension. Install it with Pi's normal package
 installer, then restart Pi:
 
 ```sh
