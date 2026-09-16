@@ -1,4 +1,5 @@
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { defaultWritableRoots } from "./filesystem-boundary.js";
 import type { SandboxRuntime, SandboxViolation } from "./types.js";
 
 export type SandboxSettings = { cwd: string; allowWrite?: readonly string[]; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
@@ -24,7 +25,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       filesystem: {
         // Runtime reads are broad by default; credential visibility is handled at the model boundary.
         allowRead: [...(settings.allowRead ?? [])], denyRead: [],
-        allowWrite: [...(settings.allowWrite ?? [settings.cwd, "/tmp"])], denyWrite: []
+        allowWrite: [...(settings.allowWrite ?? defaultWritableRoots(settings.cwd))], denyWrite: []
       },
       network: {
         // GitHub CLI remains usable with its normal credential helpers.
