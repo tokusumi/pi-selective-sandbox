@@ -31,9 +31,11 @@ export type ApprovalRequest = {
   replayWarning: boolean;
   /** The caller has established that this request can be reused before execution. */
   sessionGrantEligible?: boolean;
+  /** The caller has established that this request can be persisted for this local project. */
+  projectGrantEligible?: boolean;
 };
 
-export type ApprovalResponse = "allow-once" | "allow-session" | "deny";
+export type ApprovalResponse = "allow-once" | "allow-session" | "allow-project" | "deny";
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";
