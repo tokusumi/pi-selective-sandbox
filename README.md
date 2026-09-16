@@ -72,3 +72,23 @@ for bash requires future pre-execution/live capability widening.
 npm install
 npm test
 ```
+
+
+## Persistent project approvals
+
+For eligible outside-root write and edit preflight requests:
+
+- **Allow once** permits only the current operation.
+- **Allow for session** permits the exact capability/resource for the current Pi session, in memory.
+- **Allow for project** persists the exact capability/resource for this canonical local project across Pi sessions.
+
+The project identity is the canonical Git worktree root when available; otherwise it is the canonical startup directory. It is resolved once at extension startup, so later directory changes do not switch permissions. Moving or cloning a repository does not inherit grants.
+
+Pi's exported agent-directory convention is used for user-local state:
+/pi-selective-sandbox/project-grants.json, or
+~/.pi/agent/pi-selective-sandbox/project-grants.json by default. The file is
+versioned JSON; deleting it clears persistent approvals.
+
+Project grants are exact canonical resource capabilities. They never imply a
+directory wildcard, subtree, other capability, other project, command prefix, or
+tool-name permission. Generic bash does not consume or offer project grants.
