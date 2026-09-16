@@ -7,9 +7,14 @@ import { defaultWritableRoots } from "./filesystem-boundary.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { CapabilityPolicy } from "./policy.js";
+import { SessionGrantStore } from "./session-grants.js";
 import type { ApprovalProvider, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
 
-type ApprovalUI = { hasUI?: boolean; ui?: { select(message: string, choices: string[]): Promise<string | undefined> } };
+type ApprovalUI = {
+  hasUI?: boolean;
+  ui?: { select(message: string, choices: string[]): Promise<string | undefined> };
+  sessionManager?: { getSessionId(): string };
+};
 
 async function runCommand(local: BashOperations, command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<CommandResult> {
   const completed = await local.exec(command, cwd, {
@@ -41,15 +46,23 @@ function skills(cwd: string): SkillAuthority {
   };
 }
 
-function approvals(context: ApprovalUI): ApprovalProvider {
+/** One approval surface for both replay approvals and preflight mutation grants. */
+export function createApprovalProvider(context: ApprovalUI, grants: SessionGrantStore): ApprovalProvider {
   return {
     async request(request) {
+      const sessionId = request.sessionGrantEligible ? context.sessionManager?.getSessionId() : undefined;
+      if (sessionId && grants.covers(sessionId, request.capabilities)) return "allow-session";
       if (!context.hasUI || !context.ui) return "deny";
       const requested = request.capabilities.map(capability => `${capability.kind}: ${capability.resource}`).join("\n");
+      const sessionChoice = request.sessionGrantEligible && sessionId;
       const choice = await context.ui.select(
-        `${request.replayWarning ? "Sandbox blocked this operation" : "Permission required before this file mutation"}:\n\n${request.command}\n\nRequested capability:\n${requested}${request.replayWarning ? "\n\nThis command already ran once; replay may repeat permitted side effects." : "\n\nNo mutation has occurred yet."}`,
-        ["Allow once", "Deny"]
+        `${request.replayWarning ? "Sandbox blocked this operation" : "Permission required before this file mutation"}:\n\n${request.command}\n\nRequested capability:\n${requested}${request.replayWarning ? "\n\nThis command already ran once; replay may repeat permitted side effects." : "\n\nNo mutation has occurred yet."}${sessionChoice ? "\n\nAllow for session remembers exactly the capability/resource above for the current Pi session." : ""}`,
+        sessionChoice ? ["Allow once", "Allow for session", "Deny"] : ["Allow once", "Deny"]
       );
+      if (choice === "Allow for session" && sessionId) {
+        grants.grant(sessionId, request.capabilities);
+        return "allow-session";
+      }
       return choice === "Allow once" ? "allow-once" : "deny";
     }
   };
@@ -58,6 +71,7 @@ function approvals(context: ApprovalUI): ApprovalProvider {
 /** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
 export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
   const cwd = process.cwd();
+  const grants = new SessionGrantStore();
   const writableRoots = defaultWritableRoots(cwd);
   let runtime: AnthropicSandboxRuntime | undefined;
   let initialization: Promise<void> | undefined;
@@ -83,7 +97,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               runtime,
               runner,
               policy: new CapabilityPolicy([], "ask"),
-              approvals: approvals(context as unknown as ApprovalUI),
+              approvals: createApprovalProvider(context as unknown as ApprovalUI, grants),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
               redactor: { redact: text => redact_text(text).redacted }
@@ -98,7 +112,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
       return redactToolResult(output);
     }
   });
-  const approvalProvider = (context: unknown) => approvals(context as ApprovalUI);
+  const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants);
   pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
   pi.registerTool(await createBoundaryAwareEditTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
 }
