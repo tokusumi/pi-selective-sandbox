@@ -3,13 +3,13 @@ import test from "node:test";
 import selectiveSandboxExtension, { emitExecutorOutput, redactToolResult } from "../pi-extension.js";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
-  let tool: { name: string } | undefined;
+  const tools: { name: string }[] = [];
   const events: string[] = [];
   await selectiveSandboxExtension({
     on: (event: string) => { events.push(event); },
-    registerTool: (value: { name: string }) => { tool = value; }
+    registerTool: (value: { name: string }) => { tools.push(value); }
   } as never);
-  assert.equal(tool?.name, "bash");
+  assert.deepEqual(tools.map(tool => tool.name), ["bash", "write", "edit"]);
   assert.deepEqual(events, ["session_shutdown"]);
 });
 
@@ -35,4 +35,11 @@ test("executor-generated fail-closed messages are emitted to Pi", () => {
     chunk => chunks.push(chunk.toString())
   );
   assert.deepEqual(chunks, ["Sandbox unavailable; host execution was not attempted."]);
+});
+
+test("write fails closed without an interactive approval UI", async () => {
+  const tools: unknown[] = [];
+  await selectiveSandboxExtension({ on: () => undefined, registerTool: (tool: unknown) => { tools.push(tool); } } as never);
+  const write = tools.find((tool: any) => tool.name === "write") as any;
+  await assert.rejects(write.execute("no-ui", { path: "/var/pi-selective-denied/file.txt", content: "no" }, new AbortController().signal, () => {}));
 });

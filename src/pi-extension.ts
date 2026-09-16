@@ -3,6 +3,8 @@ import { createBashTool, createLocalBashOperations, type BashOperations, type Ex
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime } from "./runtime-adapter.js";
+import { defaultWritableRoots } from "./filesystem-boundary.js";
+import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { CapabilityPolicy } from "./policy.js";
 import type { ApprovalProvider, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
@@ -45,7 +47,7 @@ function approvals(context: ApprovalUI): ApprovalProvider {
       if (!context.hasUI || !context.ui) return "deny";
       const requested = request.capabilities.map(capability => `${capability.kind}: ${capability.resource}`).join("\n");
       const choice = await context.ui.select(
-        `Sandbox blocked this operation:\n\n${request.command}\n\nRequested capability:\n${requested}\n\nThis command already ran once; replay may repeat permitted side effects.`,
+        `${request.replayWarning ? "Sandbox blocked this operation" : "Permission required before this file mutation"}:\n\n${request.command}\n\nRequested capability:\n${requested}${request.replayWarning ? "\n\nThis command already ran once; replay may repeat permitted side effects." : "\n\nNo mutation has occurred yet."}`,
         ["Allow once", "Deny"]
       );
       return choice === "Allow once" ? "allow-once" : "deny";
@@ -53,13 +55,14 @@ function approvals(context: ApprovalUI): ApprovalProvider {
   };
 }
 
-/** Pi package entrypoint. Replaces bash with sandbox-first execution. */
+/** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
 export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
   const cwd = process.cwd();
+  const writableRoots = defaultWritableRoots(cwd);
   let runtime: AnthropicSandboxRuntime | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd }).then(value => { runtime = value; });
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, allowWrite: writableRoots }).then(value => { runtime = value; });
     try { await initialization; } catch { runtime = undefined; }
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
@@ -95,6 +98,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
       return redactToolResult(output);
     }
   });
+  const approvalProvider = (context: unknown) => approvals(context as ApprovalUI);
+  pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
+  pi.registerTool(await createBoundaryAwareEditTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
 }
 
 export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {
