@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import selectiveSandboxExtension from "../pi-extension.js";
+import selectiveSandboxExtension, { redactToolResult } from "../pi-extension.js";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   let tool: { name: string } | undefined;
@@ -15,6 +15,12 @@ test("Pi entrypoint registers a replacement bash tool", async () => {
 
 test("package manifest exposes the compiled Pi extension", async () => {
   const manifest = await import("../../package.json", { with: { type: "json" } });
-  assert.deepEqual(manifest.default.pi.extensions, ["./dist/pi-extension.js"]);
-  assert.equal("private" in manifest.default, false);
+  assert.deepEqual(manifest.default.pi.extensions, ["./src/pi-extension.ts"]);
+  assert.equal(manifest.default.private, true);
+});
+
+test("whole-result redaction protects a token split across streamed chunks", () => {
+  const chunk1 = "ghp_";
+  const chunk2 = "A".repeat(36);
+  const result = redactToolResult({ content: [{ type: "text", text: chunk1 + chunk2 }] });
 });

@@ -1,7 +1,7 @@
 {
   "name": "pi-selective-sandbox",
   "version": "0.1.0",
-  "files": ["dist/", "README.md", "LICENSE"],
+  "private": true,
   "description": "Sandbox-first, selectively escalating execution for Pi",
   "type": "module",
   "exports": {
@@ -9,7 +9,7 @@
     "./pi-extension": "./dist/pi-extension.js"
   },
   "pi": {
-    "extensions": ["./dist/pi-extension.js"]
+    "extensions": ["./src/pi-extension.ts"]
   },
   "types": "./dist/index.d.ts",
   "scripts": {
@@ -18,6 +18,8 @@
     "check": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
@@ -26,9 +28,11 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "^0.0.76",
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@spences10/pi-redact": "^0.0.15",
     "@spences10/pi-skills": "^0.0.36"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
   }
 }

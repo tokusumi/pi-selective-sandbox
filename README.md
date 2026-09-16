@@ -32,7 +32,7 @@ The published package is a Pi extension. Install it with Pi's normal package
 installer, then restart Pi:
 
 ```sh
-pi install npm:pi-selective-sandbox
+pi install git:github.com/tokusumi/pi-selective-sandbox
 ```
 
 The extension replaces Pi's `bash` tool. It initializes
@@ -46,6 +46,17 @@ Only pure helpers below each `scripts/` root receive automatic privileged
 execution. `@spences10/pi-redact` is applied to streamed and returned bash
 output before Pi makes the tool result model-visible.
 
+
+## Current limits
+
+- Bash execution is sandboxed; Pi's `write` and `edit` tools are not yet
+  sandbox-aware and must continue to use their existing tool-layer controls.
+- macOS violation telemetry can drive filesystem approval escalation. On Linux,
+  sandbox enforcement still blocks disallowed filesystem access, but the
+  runtime does not yet provide automatic filesystem-violation telemetry, so
+  those failures are returned normally rather than prompting speculatively.
+
+## Development
 
 ```sh
 npm install

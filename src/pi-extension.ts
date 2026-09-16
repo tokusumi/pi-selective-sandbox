@@ -1,6 +1,5 @@
-import { spawn } from "node:child_process";
 import { dirname } from "node:path";
-import { createBashTool, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createBashTool, createLocalBashOperations, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime } from "./runtime-adapter.js";
@@ -10,27 +9,18 @@ import type { ApprovalProvider, CommandResult, CommandRunner, SkillAuthority } f
 
 type ApprovalUI = { hasUI?: boolean; ui?: { select(message: string, choices: string[]): Promise<string | undefined> } };
 
-function runCommand(command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<CommandResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("bash", ["-c", command], { cwd, env: options.env ?? process.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    const emit = (chunk: Buffer, isError: boolean) => {
-      const text = redact_text(chunk.toString()).redacted;
-      if (isError) stderr += text;
-      else stdout += text;
-      options.onData(Buffer.from(text));
-    };
-    child.stdout?.on("data", chunk => emit(chunk, false));
-    child.stderr?.on("data", chunk => emit(chunk, true));
-    child.on("error", reject);
-    const kill = () => child.kill("SIGKILL");
-    options.signal?.addEventListener("abort", kill, { once: true });
-    child.on("close", code => {
-      options.signal?.removeEventListener("abort", kill);
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
+async function runCommand(local: BashOperations, command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<CommandResult> {
+  const completed = await local.exec(command, cwd, {
+    ...options,
+    onData: chunk => options.onData(Buffer.from(redact_text(chunk.toString()).redacted))
   });
+  return { exitCode: completed.exitCode ?? 1, stdout: "", stderr: "" };
+}
+
+export function redactToolResult<T extends { content: readonly { type: string; text?: string }[] }>(result: T): T {
+  return { ...result, content: result.content.map(item =>
+    item.type === "text" && typeof item.text === "string" ? { ...item, text: redact_text(item.text).redacted } : item
+  ) } as T;
 }
 
 function skills(cwd: string): SkillAuthority {
@@ -78,12 +68,13 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     ...localBash,
     async execute(id, params, signal, onUpdate, context) {
       await ensureRuntime();
+      const localOperations = createLocalBashOperations();
       const sandboxedBash = createBashTool(cwd, {
         operations: {
           async exec(command, commandCwd, options) {
             const runner: CommandRunner = {
-              run: wrapped => runCommand(wrapped, commandCwd, options),
-              runElevated: raw => runCommand(raw, commandCwd, options)
+              run: wrapped => runCommand(localOperations, wrapped, commandCwd, options),
+              runElevated: raw => runCommand(localOperations, raw, commandCwd, options)
             };
             const executor = new SelectiveSandboxExecutor({
               runtime,
@@ -99,7 +90,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
           }
         }
       });
-      return sandboxedBash.execute(id, params, signal, onUpdate);
+      const output = await sandboxedBash.execute(id, params, signal, onUpdate);
+      return redactToolResult(output);
     }
   });
 }
