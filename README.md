@@ -58,6 +58,27 @@ before its initial sandbox attempt, so future commands run with the base policy
 plus exactly those canonical resources.
 
 
+## Approval authority matrix
+
+| Approval | Authority | Execution | Once | Session | Project |
+| --- | --- | --- | --- | --- | --- |
+| Sandbox widening | capability + resource | sandbox | ✓ | ✓ | ✓ |
+| Host replay | exact command identity | host | ✓ | ✓ | ✓ |
+
+Approving a resource never approves leaving the sandbox. Approving host execution
+never grants a resource capability.
+
+A reusable host grant contains only the exact shell command string, canonical
+working directory, and execution mode. It is never keyed by an observed
+violation resource, executable prefix, environment, or command name. When cwd
+cannot be canonicalized, only **Run command on host once** is offered.
+
+A stored host-command grant still tries the sandbox first. It only suppresses
+the repeated host-replay prompt when that exact command encounters a sandbox
+violation again. A sandbox success or ordinary sandbox failure is returned
+without host execution. `write` and `edit` remain capability-only tools and
+never offer host execution.
+
 ## Current limits
 
 - Bash execution is enforced by the OS sandbox runtime. `write` and `edit` enforce the same writable roots with a canonical, symlink-safe tool-layer boundary because they execute inside Pi rather than a sandboxed subprocess.
