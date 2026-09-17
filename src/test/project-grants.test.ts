@@ -72,15 +72,15 @@ test("project grants take precedence, persist across providers, and bash is inel
     hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: { select: async (_message, choices) => { prompts++; seen.push(choices); return "Deny"; } }
   }, new SessionGrantStore(), { projectId: "/project-a", grants: store });
-  assert.equal(await provider.request(request("/outside/foo")), "allow-project");
+  assert.equal(await provider.request(request("/outside/foo")), "sandbox-allow-project");
   assert.equal(prompts, 0);
 
   const session = new SessionGrantStore(); session.grant("session", [write("/outside/bar")]);
   const sessionProvider = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "session" } }, session, { projectId: "/project-a", grants: store });
-  assert.equal(await sessionProvider.request(request("/outside/bar")), "allow-session");
+  assert.equal(await sessionProvider.request(request("/outside/bar")), "sandbox-allow-session");
 
   const fresh = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "new" } }, new SessionGrantStore(), { projectId: "/project-a", grants: new ProjectGrantStore(join(base, "grants.json")) });
-  assert.equal(await fresh.request({ ...request("/outside/foo"), toolName: "edit", inputDigest: "changed" }), "allow-project");
+  assert.equal(await fresh.request({ ...request("/outside/foo"), toolName: "edit", inputDigest: "changed" }), "sandbox-allow-project");
   assert.equal(await createApprovalProvider({ hasUI: false }, new SessionGrantStore(), { projectId: "/project-b", grants: new ProjectGrantStore(join(base, "grants.json")) }).request(request("/outside/foo")), "deny");
 
   await provider.request({ ...request("/outside/nope"), toolName: "bash", replayWarning: true, sessionGrantEligible: false, projectGrantEligible: false });
@@ -95,7 +95,7 @@ test("project approval UI persists before allowing and fails closed when storage
     hasUI: true, sessionManager: { getSessionId: () => "session" },
     ui: { select: async (_message, choices) => { choices && choices.length; return "Allow for project"; } }
   }, new SessionGrantStore(), { projectId: "/project", grants: store });
-  assert.equal(await provider.request(request("/outside/foo")), "allow-project");
+  assert.equal(await provider.request(request("/outside/foo")), "sandbox-allow-project");
   assert.equal(await new ProjectGrantStore(join(base, "state", "grants.json")).covers("/project", [write("/outside/foo")]), true);
 
   const blocked = join(base, "blocked"); await writeFile(blocked, "not a directory");

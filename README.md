@@ -16,8 +16,8 @@ sandbox violation attributed to the specific tool call can enter escalation.
   capabilities, and an explicit replay warning.
 - **Allow once** approves only the exact current operation. **Allow for session**
   remembers the exact capability/resource for the current Pi session, in memory.
-  It currently applies only to preflight `write`/`edit` mutations; it never grants
-  a parent directory or a different target.
+  applies to preflight `write`/`edit` and to future bash sandbox policies; it
+  never grants a parent directory or a different target.
 - Trusted Skill helpers are identified through an injected `pi-skills`
   authority and canonical paths. Only a pure, single helper invocation can
   use configured automatic trusted execution, and only from that Skill's
@@ -53,18 +53,18 @@ output before Pi makes the tool result model-visible. `write` and `edit` are in-
 For an outside-root `write` or `edit`, **Allow for session** remembers the exact
 canonical `filesystem.write` target for this Pi session. The same canonical file
 can then be written or edited without another prompt, even if the content or edit
-replacement changes. Generic bash escalation remains one-time because its
-sandboxed attempt may already have produced permitted side effects. Session reuse
-for bash requires future pre-execution/live capability widening.
+replacement changes. Bash consumes stored session and project filesystem grants
+before its initial sandbox attempt, so future commands run with the base policy
+plus exactly those canonical resources.
 
 
 ## Current limits
 
 - Bash execution is enforced by the OS sandbox runtime. `write` and `edit` enforce the same writable roots with a canonical, symlink-safe tool-layer boundary because they execute inside Pi rather than a sandboxed subprocess.
-- macOS violation telemetry can drive filesystem approval escalation. On Linux,
-  sandbox enforcement still blocks disallowed filesystem access, but the
-  runtime does not yet provide automatic filesystem-violation telemetry, so
-  those failures are returned normally rather than prompting speculatively.
+- Linux observer paths are candidate filesystem resources, not authoritative
+  kernel-denial claims. Candidates are canonicalized on the host before an
+  explicit sandbox-widening decision; the sandbox remains the enforcement
+  authority.
 
 ## Development
 
@@ -91,4 +91,5 @@ versioned JSON; deleting it clears persistent approvals.
 
 Project grants are exact canonical resource capabilities. They never imply a
 directory wildcard, subtree, other capability, other project, command prefix, or
-tool-name permission. Generic bash does not consume or offer project grants.
+tool-name permission. Bash consumes these grants as sandbox configuration before
+execution; they never authorize host execution.

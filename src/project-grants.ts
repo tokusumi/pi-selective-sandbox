@@ -6,7 +6,7 @@ import type { Capability } from "./types.js";
 type StoredCapability = { kind: Capability["kind"]; resource: string };
 type StoredGrants = { version: 1; projects: Record<string, StoredCapability[]> };
 
-const capabilityKinds = new Set<Capability["kind"]>(["filesystem.read", "filesystem.write", "network", "host.execute"]);
+const capabilityKinds = new Set<Capability["kind"]>(["filesystem.read", "filesystem.write", "network"]);
 
 function isCapability(value: unknown): value is StoredCapability {
   return typeof value === "object" && value !== null
@@ -47,6 +47,11 @@ export class ProjectGrantStore {
     if (!grants) return false;
     const keys = new Set(grants.map(capabilityKey));
     return capabilities.every(capability => keys.has(capabilityKey(capability)));
+  }
+
+  async capabilities(projectId: string): Promise<readonly Capability[]> {
+    const store = this.cache ?? await this.readAndCache();
+    return (store.projects[projectId] ?? []).map(capability => ({ ...capability }));
   }
 
   async grant(projectId: string, capabilities: readonly Capability[]): Promise<void> {

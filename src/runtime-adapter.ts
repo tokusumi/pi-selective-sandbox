@@ -18,7 +18,7 @@ function violationFromLine(line: string): SandboxViolation {
 
 /** Concrete adapter for @anthropic-ai/sandbox-runtime's per-command telemetry. */
 export class AnthropicSandboxRuntime implements SandboxRuntime {
-  private constructor() {}
+  private constructor(private readonly settings: SandboxSettings) {}
 
   static async initialize(settings: SandboxSettings): Promise<AnthropicSandboxRuntime> {
     const config: SandboxRuntimeConfig = {
@@ -33,11 +33,12 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       }
     };
     await SandboxManager.initialize(config);
-    return new AnthropicSandboxRuntime();
+    return new AnthropicSandboxRuntime(settings);
   }
 
-  async wrap(command: string, context: { commandId: string; commandText: string }): Promise<string> {
-    return SandboxManager.wrapWithSandbox(command, undefined, undefined, undefined, context);
+  async wrap(command: string, context: { commandId: string; commandText: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
+    const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
+    return SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...(this.settings.allowWrite ?? defaultWritableRoots(this.settings.cwd)), ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [] } }, undefined, context);
   }
 
   getViolationsForCommand(commandId: string): readonly SandboxViolation[] {

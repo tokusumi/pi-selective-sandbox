@@ -16,10 +16,10 @@ function fixtures(violations: readonly { kind: "filesystem.write"; resource: str
     getViolationsForCommand: () => violations
   };
   const runner = {
-    run: async () => { calls.sandbox++; return result(1, "", "normal failure"); },
-    runElevated: async () => { calls.elevated++; return result(0, "elevated"); }
+    runSandbox: async () => { calls.sandbox++; return result(1, "", "normal failure"); },
+    runHost: async () => { calls.elevated++; return result(0, "host"); }
   };
-  const approvals = { request: async () => { calls.approvals++; return "allow-once" as const; } };
+  const approvals = { request: async () => { calls.approvals++; return "sandbox-allow-once" as const; } };
   return { calls, runtime, runner, approvals };
 }
 
@@ -34,7 +34,7 @@ test("ordinary sandbox failure never requests approval", async () => {
 
 test("sandbox success is returned without entering escalation", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
-  f.runner.run = async () => { f.calls.sandbox++; return result(0, "done"); };
+  f.runner.runSandbox = async () => { f.calls.sandbox++; return result(0, "done"); };
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]) });
   const output = await executor.execute("git status", "call-success");
   assert.equal(output.disposition, "sandbox");
@@ -44,17 +44,17 @@ test("sandbox success is returned without entering escalation", async () => {
 
 test("an attributed violation asks, warns about replay, then selectively escalates", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
-  let request: { replayWarning: boolean; sessionGrantEligible?: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
+  let request: { replayWarning: boolean; sessionGrantEligible?: boolean; projectGrantEligible?: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
   const executor = new SelectiveSandboxExecutor({
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
-    approvals: { request: async value => { request = value; return "allow-once"; } }
+    approvals: { request: async value => { request = value; return "sandbox-allow-once"; } }
   });
   const output = await executor.execute("cp result.json /reports/result.json", "call-2");
-  assert.equal(output.disposition, "elevated");
-  assert.equal(f.calls.sandbox, 1);
-  assert.equal(f.calls.elevated, 1);
+  assert.equal(output.disposition, "sandbox");
+  assert.equal(f.calls.sandbox, 2);
+  assert.equal(f.calls.elevated, 0);
   assert.equal(request?.replayWarning, true);
-  assert.equal(request?.sessionGrantEligible, undefined);
+  assert.equal(request?.sessionGrantEligible, true);
   assert.equal(request?.toolCallId, "call-2");
   assert.match(request?.inputDigest ?? "", /^[a-f0-9]{64}$/);
   assert.deepEqual(request?.capabilities, [{ kind: "filesystem.write", resource: "/reports/result.json" }]);
@@ -66,9 +66,9 @@ test("post-violation auto policy still requires replay approval", async () => {
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([], "auto-escalate"), approvals: f.approvals
   });
   const output = await executor.execute("echo x >> local.log && cp x /reports/result.json", "call-auto");
-  assert.equal(output.disposition, "elevated");
+  assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.approvals, 1);
-  assert.equal(f.calls.elevated, 1);
+  assert.equal(f.calls.elevated, 0);
 });
 
 test("policy can deny a real violation without host execution", async () => {
@@ -90,7 +90,7 @@ test("sandbox initialization failure never falls back to host execution", async 
 
 test("redaction occurs before results are returned", async () => {
   const f = fixtures();
-  f.runner.run = async () => result(0, "ghp_verysecret");
+  f.runner.runSandbox = async () => result(0, "ghp_verysecret");
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]), redactor: { redact: text => text.replace(/ghp_\w+/, "[REDACTED:GitHub Token]") } });
   assert.equal((await executor.execute("gh auth token", "call-5")).stdout, "[REDACTED:GitHub Token]");
 });
@@ -111,4 +111,26 @@ test("only pure canonical helpers under an active trusted root are auto-approved
   await symlink(outside, join(root, "scripts", "escape.py"));
   assert.equal(await findTrustedHelper(`python ${join(root, "scripts", "escape.py")}`, authority), undefined);
   assert.equal(splitPureInvocation(`python ${helper} && rm -rf x`), undefined);
+});
+
+test("stored sandbox capabilities are applied before the first sandbox attempt", async () => {
+  let extras: readonly { kind: string; resource: string }[] | undefined;
+  const runtime: SandboxRuntime = {
+    wrap: async (_command, context) => { extras = context.extraCapabilities; return "sandbox command"; },
+    getViolationsForCommand: () => []
+  };
+  const runner = { runSandbox: async () => result(0), runHost: async () => result(0) };
+  const executor = new SelectiveSandboxExecutor({ runtime, runner, policy: new CapabilityPolicy([]), getSandboxCapabilities: async () => [{ kind: "filesystem.write", resource: "/approved/output" }] });
+  assert.equal((await executor.execute("touch /approved/output", "stored-grant")).disposition, "sandbox");
+  assert.deepEqual(extras, [{ kind: "filesystem.write", resource: "/approved/output" }]);
+});
+
+
+test("stored sandbox grants suppress matching diagnostic telemetry on normal failure", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/approved/output" }]);
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]), getSandboxCapabilities: async () => [{ kind: "filesystem.write", resource: "/approved/output" }] });
+  const output = await executor.execute("echo x > /approved/output; exit 1", "covered-telemetry");
+  assert.equal(output.disposition, "sandbox");
+  assert.equal(f.calls.approvals, 0);
+  assert.equal(f.calls.elevated, 0);
 });

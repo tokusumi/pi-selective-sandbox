@@ -58,7 +58,7 @@ test("context.cwd controls native target resolution without widening startup wri
   const write = await createBoundaryAwareWriteTool({
     cwd: project,
     writableRoots: [project],
-    approvals: { request: async request => { requests.push(request); return "allow-once"; } }
+    approvals: { request: async request => { requests.push(request); return "sandbox-allow-once"; } }
   });
   await write.execute("context-cwd", { path: "foo.txt", content: "from-context" }, signal, noUpdate, { cwd: otherProject });
   assert.equal(await readFile(join(otherProject, "foo.txt"), "utf8"), "from-context");
@@ -91,7 +91,7 @@ test("outside write denies before native execution and reports canonical metadat
 test("outside allow-once executes exactly once, while denied edit remains unchanged", async () => {
   const { project, outside } = await fixture();
   const calls: Input[] = []; let approvals = 0;
-  const write = await tool("write", project, async () => { approvals++; return "allow-once"; }, calls);
+  const write = await tool("write", project, async () => { approvals++; return "sandbox-allow-once"; }, calls);
   await write.execute("w", { path: join(outside, "file.txt"), content: "x" }, signal, noUpdate);
   assert.equal(approvals, 1); assert.equal(calls.length, 1);
   const editCalls: Input[] = [];
@@ -107,7 +107,7 @@ test("native outside mutations deny before side effects and allow once exactly o
   await assert.rejects(denied.execute("deny", { path: target, content: "no" }, signal, noUpdate));
   await assert.rejects(readFile(target));
   const requests: ApprovalRequest[] = [];
-  const allowed = await createBoundaryAwareWriteTool({ cwd: project, writableRoots: [project], approvals: { request: async request => { requests.push(request); return "allow-once"; } } });
+  const allowed = await createBoundaryAwareWriteTool({ cwd: project, writableRoots: [project], approvals: { request: async request => { requests.push(request); return "sandbox-allow-once"; } } });
   await allowed.execute("allow", { path: target, content: "yes" }, signal, noUpdate);
   assert.equal(await readFile(target, "utf8"), "yes");
   assert.equal(requests.length, 1);
@@ -115,7 +115,7 @@ test("native outside mutations deny before side effects and allow once exactly o
   await assert.rejects(deniedEdit.execute("edit-deny", { path: target, edits: [{ oldText: "yes", newText: "no" }] }, signal, noUpdate));
   assert.equal(await readFile(target, "utf8"), "yes");
   const editRequests: ApprovalRequest[] = [];
-  const allowedEdit = await createBoundaryAwareEditTool({ cwd: project, writableRoots: [project], approvals: { request: async request => { editRequests.push(request); return "allow-once"; } } });
+  const allowedEdit = await createBoundaryAwareEditTool({ cwd: project, writableRoots: [project], approvals: { request: async request => { editRequests.push(request); return "sandbox-allow-once"; } } });
   await allowedEdit.execute("edit-allow", { path: target, edits: [{ oldText: "yes", newText: "edited" }] }, signal, noUpdate);
   assert.equal(await readFile(target, "utf8"), "edited");
   assert.equal(editRequests.length, 1);

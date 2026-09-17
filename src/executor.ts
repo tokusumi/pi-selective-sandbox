@@ -1,60 +1,28 @@
 import { createHash } from "node:crypto";
 import { findTrustedHelper } from "./skills.js";
-import type {
-  ApprovalProvider, Capability, CommandResult, CommandRunner, EscalationPolicy,
-  ExecutionResult, Redactor, SandboxRuntime, SkillAuthority
-} from "./types.js";
+import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority } from "./types.js";
 
-export type SelectiveSandboxOptions = {
-  runtime?: SandboxRuntime;
-  runner: CommandRunner;
-  policy: EscalationPolicy;
-  approvals?: ApprovalProvider;
-  skills?: SkillAuthority;
-  redactor?: Redactor;
-  trustedHelpersAutoApprove?: boolean;
-};
+export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[]>; commandIdentity?: (c: string) => CommandIdentity };
+const digest = (v: string) => createHash("sha256").update(v).digest("hex");
+const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redactor ? r : { ...r, stdout: redactor.redact(r.stdout), stderr: redactor.redact(r.stderr) };
 
-const digest = (value: string) => createHash("sha256").update(value).digest("hex");
-const redact = (result: CommandResult, redactor?: Redactor): CommandResult => !redactor ? result : {
-  ...result, stdout: redactor.redact(result.stdout), stderr: redactor.redact(result.stderr)
-};
-
-export class SelectiveSandboxExecutor {
-  constructor(private readonly options: SelectiveSandboxOptions) {}
-
+export class SelectiveSandboxExecutor { constructor(private readonly options: SelectiveSandboxOptions) {}
   async execute(command: string, toolCallId: string, toolName = "bash"): Promise<ExecutionResult> {
     const { runtime, runner, policy, approvals, skills } = this.options;
     if (!runtime) return this.finish({ exitCode: 126, stdout: "", stderr: "Sandbox unavailable; host execution was not attempted." }, "sandbox-unavailable", []);
-
-    // This narrow pre-classification is only for authority-proven, syntactically pure helpers.
-    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) {
-      return this.finish(await runner.runElevated(command, [{ kind: "host.execute", resource: "trusted-skill-helper" }]), "elevated", []);
-    }
-
-    let wrapped: string;
-    try { wrapped = await runtime.wrap(command, { commandId: toolCallId, commandText: command }); }
-    catch { return this.finish({ exitCode: 126, stdout: "", stderr: "Sandbox unavailable; host execution was not attempted." }, "sandbox-unavailable", []); }
-    const first = await runner.run(wrapped);
-    // A completed sandbox invocation is final: success never enters escalation.
+    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return this.finish(await runner.runHost(command), "host", []);
+    const stored = await this.options.getSandboxCapabilities?.() ?? [];
+    let first: CommandResult; try { first = await this.runSandbox(command, toolCallId, stored); } catch { return this.finish({ exitCode: 126, stdout: "", stderr: "Sandbox unavailable; host execution was not attempted." }, "sandbox-unavailable", []); }
     if (first.exitCode === 0) return this.finish(first, "sandbox", []);
-    const violations = runtime.getViolationsForCommand(toolCallId);
-    // Exit status is intentionally irrelevant without attributed runtime evidence.
-    if (violations.length === 0) return this.finish(first, "sandbox", []);
-
-    const decision = policy.decide(violations, { command, toolCallId });
-    if (decision === "deny") return this.finish({ ...first, stderr: `${first.stderr}\nSandbox blocked: ${violations.map(v => `${v.kind}:${v.resource}`).join(", ")}`.trim() }, "denied", violations);
-    if (decision === "ask" || decision === "auto-escalate") {
-      if (!approvals) return this.finish({ ...first, stderr: `${first.stderr}\nSandbox escalation requires interactive approval.`.trim() }, "denied", violations);
-      const response = await approvals.request({ toolCallId, toolName, inputDigest: digest(command), capabilities: violations, command, replayWarning: true });
-      if (response === "deny") return this.finish(first, "denied", violations);
-      // A generic command may have already changed allowed state. Never silently replay it.
-      // Approval is bound to this exact request; callers must create a fresh call for mutations.
-    }
-    return this.finish(await runner.runElevated(command, violations as readonly Capability[]), "elevated", violations);
+    const violations = runtime.getViolationsForCommand(toolCallId).filter(violation => !stored.some(capability => capability.kind === violation.kind && capability.resource === violation.resource)); if (violations.length === 0) return this.finish(first, "sandbox", []);
+    if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(first, "denied", violations);
+    const candidates = violations.filter(v => v.kind === "filesystem.write");
+    const caps = candidates.length ? await (this.options.canonicalizeCapabilities?.(candidates) ?? candidates) : [];
+    const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity: (this.options.commandIdentity ?? (shellCommand => ({ shellCommand, cwd: process.cwd(), executionMode: "shell" })))(command) });
+    if (response === "host-allow-once") return this.finish(await runner.runHost(command), "host", violations);
+    if (response === "deny" || caps.length === 0) return this.finish(first, "denied", violations);
+    return this.finish(await this.runSandbox(command, toolCallId + ":widened", [...stored, ...caps]), "sandbox", violations);
   }
-
-  private finish(result: CommandResult, disposition: ExecutionResult["disposition"], violations: ExecutionResult["violations"]): ExecutionResult {
-    return { ...redact(result, this.options.redactor), disposition, violations };
-  }
+  private async runSandbox(command: string, commandId: string, caps: readonly Capability[]): Promise<CommandResult> { const runtime = this.options.runtime!; return this.options.runner.runSandbox(await runtime.wrap(command, { commandId, commandText: command, extraCapabilities: caps })); }
+  private finish(result: CommandResult, disposition: ExecutionResult["disposition"], violations: ExecutionResult["violations"]): ExecutionResult { return { ...redact(result, this.options.redactor), disposition, violations }; }
 }

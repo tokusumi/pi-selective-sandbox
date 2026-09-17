@@ -35,15 +35,15 @@ test("approval provider stores only Allow for session and reuses it noninteracti
     hasUI: true, sessionManager: { getSessionId: () => "A" },
     ui: { select: async () => { prompts++; return "Allow once"; } }
   }, grants);
-  assert.equal(await interactive.request(request("/outside/a")), "allow-once");
+  assert.equal(await interactive.request(request("/outside/a")), "sandbox-allow-once");
   assert.equal(grants.covers("A", [write("/outside/a")]), false);
   const denied = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async () => "Deny" } }, grants);
   assert.equal(await denied.request(request("/outside/a")), "deny");
   assert.equal(grants.covers("A", [write("/outside/a")]), false);
   const session = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async () => "Allow for session" } }, grants);
-  assert.equal(await session.request(request("/outside/a")), "allow-session");
+  assert.equal(await session.request(request("/outside/a")), "sandbox-allow-session");
   const noninteractive = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "A" } }, grants);
-  assert.equal(await noninteractive.request(request("/outside/a")), "allow-session");
+  assert.equal(await noninteractive.request(request("/outside/a")), "sandbox-allow-session");
   assert.equal(await noninteractive.request(request("/outside/b")), "deny");
   assert.equal(await createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "B" } }, grants).request(request("/outside/a")), "deny");
   assert.equal(prompts, 1);
