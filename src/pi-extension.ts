@@ -61,9 +61,9 @@ export function createApprovalProvider(
       if (!context.hasUI || !context.ui) return "deny";
 
       const requested = request.capabilities.map(capability => capability.kind + ": " + capability.resource).join("\n");
-      const choices = request.kind === "escalation" ? ["Allow resource in sandbox once", "Run command on host once"] : ["Allow once"];
-      if (sessionId) choices.push("Allow for session");
-      if (projectEligible) choices.push("Allow for project");
+      const choices = request.kind === "escalation" ? ["Allow resource in sandbox once", ...(sessionId ? ["Allow resource in sandbox for session"] : []), ...(projectEligible ? ["Allow resource in sandbox for project"] : []), "Run command on host once"] : ["Allow once"];
+      if (request.kind !== "escalation" && sessionId) choices.push("Allow for session");
+      if (request.kind !== "escalation" && projectEligible) choices.push("Allow for project");
       choices.push("Deny");
       const scopeMessage = projectEligible
         ? "\n\nAllow for project remembers exactly:\n" + requested + "\n\nfor local project:\n" + project.projectId + "\nincluding future Pi sessions."
@@ -72,11 +72,11 @@ export function createApprovalProvider(
         + ":\n\n" + request.command + "\n\nRequested capability:\n" + requested
         + (request.replayWarning ? "\n\nThis command already ran once; replay may repeat permitted side effects." : "\n\nNo mutation has occurred yet.") + scopeMessage;
       const choice = await context.ui.select(message, choices);
-      if (choice === "Allow for project" && projectEligible) {
+      if ((choice === "Allow for project" || choice === "Allow resource in sandbox for project") && projectEligible) {
         try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; }
         catch { return "deny"; }
       }
-      if (choice === "Allow for session" && sessionId) { grants.grant(sessionId, request.capabilities); return "sandbox-allow-session"; }
+      if ((choice === "Allow for session" || choice === "Allow resource in sandbox for session") && sessionId) { grants.grant(sessionId, request.capabilities); return "sandbox-allow-session"; }
       if (request.kind === "escalation") return choice === "Run command on host once" ? "host-allow-once" : choice === "Allow resource in sandbox once" ? "sandbox-allow-once" : "deny";
       return choice === "Allow once" ? "sandbox-allow-once" : "deny";
     }
@@ -119,6 +119,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
+              getSandboxCapabilities: async () => { const sessionId = (context as unknown as ApprovalUI).sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
               canonicalizeCapabilities: async capabilities => { const boundary = await MutationBoundary.create(commandCwd); return Promise.all(capabilities.map(async capability => ({ ...capability, resource: (await boundary.resolve(capability.resource)).canonical }))); },
               commandIdentity: shellCommand => ({ shellCommand, cwd: commandCwd, executionMode: "shell" }),
               redactor: { redact: text => redact_text(text).redacted }

@@ -44,7 +44,7 @@ test("sandbox success is returned without entering escalation", async () => {
 
 test("an attributed violation asks, warns about replay, then selectively escalates", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
-  let request: { replayWarning: boolean; sessionGrantEligible?: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
+  let request: { replayWarning: boolean; sessionGrantEligible?: boolean; projectGrantEligible?: boolean; capabilities: readonly { resource: string }[]; toolCallId: string; inputDigest: string } | undefined;
   const executor = new SelectiveSandboxExecutor({
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
     approvals: { request: async value => { request = value; return "sandbox-allow-once"; } }
@@ -54,7 +54,7 @@ test("an attributed violation asks, warns about replay, then selectively escalat
   assert.equal(f.calls.sandbox, 2);
   assert.equal(f.calls.elevated, 0);
   assert.equal(request?.replayWarning, true);
-  assert.equal(request?.sessionGrantEligible, undefined);
+  assert.equal(request?.sessionGrantEligible, true);
   assert.equal(request?.toolCallId, "call-2");
   assert.match(request?.inputDigest ?? "", /^[a-f0-9]{64}$/);
   assert.deepEqual(request?.capabilities, [{ kind: "filesystem.write", resource: "/reports/result.json" }]);
@@ -111,4 +111,16 @@ test("only pure canonical helpers under an active trusted root are auto-approved
   await symlink(outside, join(root, "scripts", "escape.py"));
   assert.equal(await findTrustedHelper(`python ${join(root, "scripts", "escape.py")}`, authority), undefined);
   assert.equal(splitPureInvocation(`python ${helper} && rm -rf x`), undefined);
+});
+
+test("stored sandbox capabilities are applied before the first sandbox attempt", async () => {
+  let extras: readonly { kind: string; resource: string }[] | undefined;
+  const runtime: SandboxRuntime = {
+    wrap: async (_command, context) => { extras = context.extraCapabilities; return "sandbox command"; },
+    getViolationsForCommand: () => []
+  };
+  const runner = { runSandbox: async () => result(0), runHost: async () => result(0) };
+  const executor = new SelectiveSandboxExecutor({ runtime, runner, policy: new CapabilityPolicy([]), getSandboxCapabilities: async () => [{ kind: "filesystem.write", resource: "/approved/output" }] });
+  assert.equal((await executor.execute("touch /approved/output", "stored-grant")).disposition, "sandbox");
+  assert.deepEqual(extras, [{ kind: "filesystem.write", resource: "/approved/output" }]);
 });

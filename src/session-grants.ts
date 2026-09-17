@@ -3,7 +3,7 @@ import { capabilityKey } from "./capability-key.js";
 
 /** In-memory, exact capability/resource grants, partitioned by Pi session ID. */
 export class SessionGrantStore {
-  private readonly grants = new Map<string, Set<string>>();
+  private readonly grants = new Map<string, Map<string, Capability>>();
 
   covers(sessionId: string, capabilities: readonly Capability[]): boolean {
     if (capabilities.length === 0) return false;
@@ -13,10 +13,12 @@ export class SessionGrantStore {
 
   grant(sessionId: string, capabilities: readonly Capability[]): void {
     if (capabilities.length === 0) return;
-    const sessionGrants = this.grants.get(sessionId) ?? new Set<string>();
+    const sessionGrants = this.grants.get(sessionId) ?? new Map<string, Capability>();
     this.grants.set(sessionId, sessionGrants);
-    for (const capability of capabilities) sessionGrants.add(capabilityKey(capability));
+    for (const capability of capabilities) sessionGrants.set(capabilityKey(capability), { ...capability });
   }
+
+  capabilities(sessionId: string): readonly Capability[] { return [...(this.grants.get(sessionId)?.values() ?? [])]; }
 
   clear(sessionId: string): void {
     this.grants.delete(sessionId);

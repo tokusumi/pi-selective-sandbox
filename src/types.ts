@@ -42,7 +42,7 @@ export type SandboxApprovalRequest = {
 
 export type EscalationApprovalRequest = Omit<SandboxApprovalRequest, "kind"> & { kind: "escalation"; commandIdentity: CommandIdentity };
 export type ApprovalRequest = SandboxApprovalRequest | EscalationApprovalRequest;
-export type ApprovalResponse = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project" | "host-allow-once" | "allow-once" | "allow-session" | "allow-project" | "deny";
+export type ApprovalResponse = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project" | "host-allow-once" | "deny";
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";

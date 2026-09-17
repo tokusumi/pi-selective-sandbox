@@ -49,6 +49,11 @@ export class ProjectGrantStore {
     return capabilities.every(capability => keys.has(capabilityKey(capability)));
   }
 
+  async capabilities(projectId: string): Promise<readonly Capability[]> {
+    const store = this.cache ?? await this.readAndCache();
+    return (store.projects[projectId] ?? []).map(capability => ({ ...capability }));
+  }
+
   async grant(projectId: string, capabilities: readonly Capability[]): Promise<void> {
     if (capabilities.length === 0) return;
     // Merge newest disk state so another Pi process is not trivially overwritten.

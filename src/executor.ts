@@ -18,7 +18,7 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(first, "denied", violations);
     const candidates = violations.filter(v => v.kind === "filesystem.write");
     const caps = candidates.length ? await (this.options.canonicalizeCapabilities?.(candidates) ?? candidates) : [];
-    const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, commandIdentity: (this.options.commandIdentity ?? (shellCommand => ({ shellCommand, cwd: process.cwd(), executionMode: "shell" })))(command) });
+    const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity: (this.options.commandIdentity ?? (shellCommand => ({ shellCommand, cwd: process.cwd(), executionMode: "shell" })))(command) });
     if (response === "host-allow-once") return this.finish(await runner.runHost(command), "host", violations);
     if (response === "deny" || caps.length === 0) return this.finish(first, "denied", violations);
     return this.finish(await this.runSandbox(command, toolCallId + ":widened", [...stored, ...caps]), "sandbox", violations);
