@@ -14,7 +14,7 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     const stored = await this.options.getSandboxCapabilities?.() ?? [];
     let first: CommandResult; try { first = await this.runSandbox(command, toolCallId, stored); } catch { return this.finish({ exitCode: 126, stdout: "", stderr: "Sandbox unavailable; host execution was not attempted." }, "sandbox-unavailable", []); }
     if (first.exitCode === 0) return this.finish(first, "sandbox", []);
-    const violations = runtime.getViolationsForCommand(toolCallId); if (violations.length === 0) return this.finish(first, "sandbox", []);
+    const violations = runtime.getViolationsForCommand(toolCallId).filter(violation => !stored.some(capability => capability.kind === violation.kind && capability.resource === violation.resource)); if (violations.length === 0) return this.finish(first, "sandbox", []);
     if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(first, "denied", violations);
     const candidates = violations.filter(v => v.kind === "filesystem.write");
     const caps = candidates.length ? await (this.options.canonicalizeCapabilities?.(candidates) ?? candidates) : [];

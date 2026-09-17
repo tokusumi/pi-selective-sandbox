@@ -124,3 +124,13 @@ test("stored sandbox capabilities are applied before the first sandbox attempt",
   assert.equal((await executor.execute("touch /approved/output", "stored-grant")).disposition, "sandbox");
   assert.deepEqual(extras, [{ kind: "filesystem.write", resource: "/approved/output" }]);
 });
+
+
+test("stored sandbox grants suppress matching diagnostic telemetry on normal failure", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/approved/output" }]);
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]), getSandboxCapabilities: async () => [{ kind: "filesystem.write", resource: "/approved/output" }] });
+  const output = await executor.execute("echo x > /approved/output; exit 1", "covered-telemetry");
+  assert.equal(output.disposition, "sandbox");
+  assert.equal(f.calls.approvals, 0);
+  assert.equal(f.calls.elevated, 0);
+});
