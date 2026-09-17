@@ -6,7 +6,7 @@ import type { Capability } from "./types.js";
 type StoredCapability = { kind: Capability["kind"]; resource: string };
 type StoredGrants = { version: 1; projects: Record<string, StoredCapability[]> };
 
-const capabilityKinds = new Set<Capability["kind"]>(["filesystem.read", "filesystem.write", "network", "host.execute"]);
+const capabilityKinds = new Set<Capability["kind"]>(["filesystem.read", "filesystem.write", "network"]);
 
 function isCapability(value: unknown): value is StoredCapability {
   return typeof value === "object" && value !== null

@@ -1,5 +1,12 @@
+export type CapabilityKind = "filesystem.read" | "filesystem.write" | "network";
+export type CanonicalResource = string;
+export type SandboxCapabilityGrant = { kind: "sandbox-capability"; capability: CapabilityKind; resource: CanonicalResource; scope: "once" | "session" | "project" };
+export type CommandIdentity = { shellCommand: string; cwd: CanonicalResource; executionMode: string };
+export type HostCommandGrant = { kind: "host-command"; command: CommandIdentity; scope: "once" | "session" | "project" };
+
+/** A sandbox capability/resource pair. It never authorizes host execution. */
 export type Capability = {
-  kind: "filesystem.read" | "filesystem.write" | "network" | "host.execute";
+  kind: CapabilityKind;
   resource: string;
 };
 
@@ -12,43 +19,37 @@ export type CommandResult = {
 };
 
 export type SandboxRuntime = {
-  wrap(command: string, context: { commandId: string; commandText: string }): Promise<string>;
+  wrap(command: string, context: { commandId: string; commandText: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
   getViolationsForCommand(commandId: string): readonly SandboxViolation[];
 };
 
 export type CommandRunner = {
-  run(command: string): Promise<CommandResult>;
-  /** Runs with only the requested extra capabilities, or host execution as a last resort. */
-  runElevated(command: string, capabilities: readonly Capability[]): Promise<CommandResult>;
+  runSandbox(command: string): Promise<CommandResult>;
+  runHost(command: string): Promise<CommandResult>;
 };
 
-export type ApprovalRequest = {
+export type SandboxApprovalRequest = {
+  kind?: "sandbox-capability";
   toolCallId: string;
   toolName: string;
   inputDigest: string;
   capabilities: readonly Capability[];
   command: string;
   replayWarning: boolean;
-  /** The caller has established that this request can be reused before execution. */
   sessionGrantEligible?: boolean;
-  /** The caller has established that this request can be persisted for this local project. */
   projectGrantEligible?: boolean;
 };
 
-export type ApprovalResponse = "allow-once" | "allow-session" | "allow-project" | "deny";
+export type EscalationApprovalRequest = Omit<SandboxApprovalRequest, "kind"> & { kind: "escalation"; commandIdentity: CommandIdentity };
+export type ApprovalRequest = SandboxApprovalRequest | EscalationApprovalRequest;
+export type ApprovalResponse = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project" | "host-allow-once" | "allow-once" | "allow-session" | "allow-project" | "deny";
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";
-export type EscalationPolicy = {
-  decide(violations: readonly SandboxViolation[], context: { command: string; toolCallId: string }): EscalationDecision;
-};
+export type EscalationPolicy = { decide(violations: readonly SandboxViolation[], context: { command: string; toolCallId: string }): EscalationDecision; };
 
 export type ActiveSkill = { id: string; root: string; helperRoots?: readonly string[]; trusted: boolean; active: boolean };
-/** Implemented by pi-skills (or its adapter); this package stores no Skill trust state. */
 export type SkillAuthority = { getActiveSkills(): Promise<readonly ActiveSkill[]> };
 export type Redactor = { redact(text: string): string };
 
-export type ExecutionResult = CommandResult & {
-  disposition: "sandbox" | "elevated" | "denied" | "sandbox-unavailable";
-  violations: readonly SandboxViolation[];
-};
+export type ExecutionResult = CommandResult & { disposition: "sandbox" | "host" | "denied" | "sandbox-unavailable"; violations: readonly SandboxViolation[]; };
