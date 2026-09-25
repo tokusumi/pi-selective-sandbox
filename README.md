@@ -54,9 +54,24 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 ## Behavior
 
-The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory and `/tmp` writable, broad reads, and GitHub API access for authenticated `gh` use. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
+The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and GitHub API access for authenticated `gh` use. The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
 For `write` and `edit`, a canonical target inside configured writable roots executes normally. A target outside those roots must receive a sandbox-capability approval before any file-content read, directory creation, or mutation. Native write/edit never offer host-command approval.
+
+### Filesystem configuration
+
+Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. Missing or malformed configuration falls back to defaults; malformed input emits a diagnostic. Extra roots remain inside the sandbox and do not authorize host replay.
+
+```json
+{
+  "filesystem": {
+    "extraWritableRoots": ["~/.cache/uv", "/mnt/build-cache"],
+    "disabledDefaultProfiles": []
+  }
+}
+```
+
+Paths beginning with `~/` are expanded, relative paths are resolved against the startup working directory, and paths are canonicalized. Available default profile names are `workspace`, `tmp`, and `cargo-cache`. For example, set `disabledDefaultProfiles` to `["cargo-cache"]` to remove Cargo's default writable cache profile.
 
 ## Platform notes
 

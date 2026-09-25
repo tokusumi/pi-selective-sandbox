@@ -21,8 +21,14 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   OS sandbox runtime before the command runner starts them.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,
   canonical filesystem boundary before invoking the native tool.
-- Default writable roots are the extension startup working directory and
-  `/tmp`; the runtime and native boundary use the same default policy.
+- The resolved default write policy permits the extension startup working
+  directory, `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
+  Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
+  `credentials.toml`, and `env` are denied. Deny rules take precedence.
+- At startup, optional user-local configuration can disable named default
+  profiles or add writable roots. Tilde expansion, absolute resolution,
+  canonicalization, and deduplication happen once; the exact resolved policy
+  instance is shared by the runtime and native mutation boundary.
 
 ## 3. Approval authorities
 
@@ -83,8 +89,8 @@ ancestor, canonicalizing paths to prevent symlink escape.
 
 ```text
 canonical target
-  → inside writable roots → execute
-  → outside writable roots → preflight sandbox-capability approval
+  → inside an allow root and outside every deny root → execute
+  → otherwise → preflight sandbox-capability approval
 ```
 
 No host-command approval is offered for native `write` or `edit`. If preflight
@@ -236,3 +242,21 @@ not weaken or choose the security boundary.
 - It does not broaden native write/edit to host execution.
 - It does not implement command-prefix or executable-name allowlists for host
   execution.
+
+## 17. Filesystem configuration
+
+The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json`:
+
+```json
+{
+  "filesystem": {
+    "extraWritableRoots": ["~/.cache/uv"],
+    "disabledDefaultProfiles": ["cargo-cache"]
+  }
+}
+```
+
+The built-in profiles are `workspace`, `tmp`, and `cargo-cache`. Extra writable
+roots widen only the sandbox filesystem policy. They never grant host replay.
+Missing or malformed configuration uses defaults; malformed configuration is
+reported diagnostically. Unknown disabled profile names have no effect.

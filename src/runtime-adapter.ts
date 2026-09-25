@@ -1,9 +1,9 @@
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { readFile } from "node:fs/promises";
-import { defaultWritableRoots } from "./filesystem-boundary.js";
+import type { WritePolicy } from "./filesystem-policy.js";
 import type { SandboxRuntime, SandboxViolation } from "./types.js";
 
-export type SandboxSettings = { cwd: string; allowWrite?: readonly string[]; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
+export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
 export function isUbuntu24Release(osRelease: string): boolean {
   const values = new Map(osRelease.split("\n").map(line => {
@@ -20,11 +20,12 @@ export async function isUbuntu24(osReleasePath = "/etc/os-release"): Promise<boo
 }
 
 export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUnixSockets = false): SandboxRuntimeConfig {
+  const policy = settings.writePolicy;
   return {
     filesystem: {
       // Runtime reads are broad by default; credential visibility is handled at the model boundary.
       allowRead: [...(settings.allowRead ?? [])], denyRead: [],
-      allowWrite: [...(settings.allowWrite ?? defaultWritableRoots(settings.cwd))], denyWrite: []
+      allowWrite: [...policy.allow], denyWrite: [...policy.deny]
     },
     network: {
       // GitHub CLI remains usable with its normal credential helpers.
@@ -71,7 +72,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
 
   async wrap(command: string, context: { commandId: string; commandText: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
-    return SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...(this.settings.allowWrite ?? defaultWritableRoots(this.settings.cwd)), ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [] } }, undefined, context);
+    const policy = this.settings.writePolicy;
+    return SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, context);
   }
 
   getViolationsForCommand(commandId: string): readonly SandboxViolation[] {

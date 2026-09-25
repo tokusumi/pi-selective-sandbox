@@ -4,7 +4,9 @@ import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperat
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-adapter.js";
-import { defaultWritableRoots, MutationBoundary } from "./filesystem-boundary.js";
+import { MutationBoundary } from "./filesystem-boundary.js";
+import { loadConfig } from "./config.js";
+import { resolveWritePolicy } from "./filesystem-policy.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { CapabilityPolicy } from "./policy.js";
@@ -135,12 +137,13 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   if (projectGrants) await projectGrants.load();
   if (projectHostGrants) await projectHostGrants.load();
   const project = projectId && projectGrants && projectHostGrants ? { projectId, grants: projectGrants, hostGrants: projectHostGrants } : undefined;
-  const writableRoots = defaultWritableRoots(cwd);
+  const config = await loadConfig(join(getAgentDir(), "pi-selective-sandbox", "config.json"));
+  const writePolicy = await resolveWritePolicy({ cwd, config, env: process.env });
   let runtime: AnthropicSandboxRuntime | undefined;
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, allowWrite: writableRoots }).then(value => { runtime = value; });
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy }).then(value => { runtime = value; });
     try { await initialization; } catch (error) { runtime = undefined; sandboxUnavailableMessage = sandboxInitializationError(error); }
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
@@ -166,7 +169,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
               getSandboxCapabilities: async () => { const sessionId = (context as unknown as ApprovalUI).sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
-              canonicalizeCapabilities: async capabilities => { const boundary = await MutationBoundary.create(commandCwd); return Promise.all(capabilities.map(async capability => ({ ...capability, resource: (await boundary.resolve(capability.resource)).canonical }))); },
+              canonicalizeCapabilities: async capabilities => { const boundary = await MutationBoundary.create(commandCwd, writePolicy); return Promise.all(capabilities.map(async capability => ({ ...capability, resource: (await boundary.resolve(capability.resource)).canonical }))); },
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
               redactor: { redact: text => redact_text(text).redacted }
             });
@@ -181,8 +184,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     }
   });
   const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants);
-  pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
-  pi.registerTool(await createBoundaryAwareEditTool({ cwd, writableRoots, approvals: approvalProvider }) as never);
+  pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
+  pi.registerTool(await createBoundaryAwareEditTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
 }
 
 export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {

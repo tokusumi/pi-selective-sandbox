@@ -1,6 +1,7 @@
 import { createEditTool, createWriteTool, type EditToolInput, type WriteToolInput } from "@earendil-works/pi-coding-agent";
 import { MutationBoundary, defaultWritableRoots, inputDigest } from "./filesystem-boundary.js";
 import type { ApprovalProvider } from "./types.js";
+import type { WritePolicy } from "./filesystem-policy.js";
 
 type MutationInput = { path: string };
 type NativeTool<T extends MutationInput> = {
@@ -10,6 +11,7 @@ type NativeTool<T extends MutationInput> = {
 
 export type MutationToolOptions = {
   cwd: string;
+  writePolicy?: WritePolicy;
   writableRoots?: readonly string[] | ((cwd: string, context: unknown) => readonly string[]);
   approvals: ApprovalProvider | ((context: unknown) => ApprovalProvider);
 };
@@ -33,8 +35,9 @@ export async function boundaryAwareTool<T extends MutationInput>(
       const writableRoots = typeof options.writableRoots === "function"
         ? options.writableRoots(effectiveCwd, context)
         : options.writableRoots ?? defaultWritableRoots(effectiveCwd);
-      const boundary = await MutationBoundary.create(effectiveCwd, writableRoots);
+      const boundary = await MutationBoundary.create(effectiveCwd, options.writePolicy ?? writableRoots);
       const target = await boundary.resolve(params.path);
+      if (target.denied) throw new Error(`Permission denied: ${toolName} targets a configured deny root`);
       if (!target.allowed) {
         const provider = typeof options.approvals === "function" ? options.approvals(context) : options.approvals;
         const decision = await provider.request({
