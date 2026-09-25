@@ -60,6 +60,39 @@ test("an attributed violation asks, warns about replay, then selectively escalat
   assert.deepEqual(request?.capabilities, [{ kind: "filesystem.write", resource: "/reports/result.json" }]);
 });
 
+test("mixed violations with a deny-root candidate suppress sandbox widening", async () => {
+  const f = fixtures([
+    { kind: "filesystem.write", resource: "/ordinary/output" },
+    { kind: "filesystem.write", resource: "/denied/output" }
+  ]);
+  let offered: readonly { resource: string }[] | undefined;
+  const executor = new SelectiveSandboxExecutor({
+    runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
+    canonicalizeCapabilities: async () => undefined,
+    approvals: { request: async request => { offered = request.capabilities; return "host-allow-once"; } }
+  });
+  const output = await executor.execute("write two outputs", "mixed-deny");
+  assert.equal(output.disposition, "host");
+  assert.deepEqual(offered, []);
+  assert.equal(f.calls.sandbox, 1);
+  assert.equal(f.calls.elevated, 1);
+});
+
+test("a stored grant cannot hide a deny-root violation", async () => {
+  const denied = { kind: "filesystem.write" as const, resource: "/denied/output" };
+  const f = fixtures([denied]);
+  let offered: readonly { resource: string }[] | undefined;
+  const executor = new SelectiveSandboxExecutor({
+    runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
+    getSandboxCapabilities: async () => [denied],
+    canonicalizeCapabilities: async () => undefined,
+    approvals: { request: async request => { offered = request.capabilities; return "host-allow-once"; } }
+  });
+  assert.equal((await executor.execute("write denied output", "stored-deny")).disposition, "host");
+  assert.deepEqual(offered, []);
+  assert.equal(f.calls.elevated, 1);
+});
+
 test("post-violation auto policy still requires replay approval", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/reports/result.json" }]);
   const executor = new SelectiveSandboxExecutor({

@@ -76,6 +76,22 @@ test("allowed temporary root does not prompt", async () => {
   assert.equal(calls.length, 1);
 });
 
+test("deny roots take precedence without offering an ineffective approval", async () => {
+  const { project } = await fixture();
+  const protectedPath = join(project, "protected"); await mkdir(protectedPath);
+  let nativeCalls = 0; let approvals = 0;
+  const write = await boundaryAwareTool<Input>("write", {
+    async execute() { nativeCalls++; }
+  }, {
+    cwd: project,
+    writePolicy: { allow: [project], deny: [protectedPath] },
+    approvals: { request: async () => { approvals++; return "sandbox-allow-once"; } }
+  });
+  await assert.rejects(write.execute("denied", { path: join(protectedPath, "file"), content: "x" }, signal, noUpdate), /configured deny root/);
+  assert.equal(nativeCalls, 0);
+  assert.equal(approvals, 0);
+});
+
 test("outside write denies before native execution and reports canonical metadata", async () => {
   const { project, outside } = await fixture();
   const calls: Input[] = []; const requests: ApprovalRequest[] = [];

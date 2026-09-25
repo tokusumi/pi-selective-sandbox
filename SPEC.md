@@ -21,8 +21,19 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   OS sandbox runtime before the command runner starts them.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,
   canonical filesystem boundary before invoking the native tool.
-- Default writable roots are the extension startup working directory and
-  `/tmp`; the runtime and native boundary use the same default policy.
+- The resolved default write policy permits the extension startup working
+  directory, `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
+  Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
+  `credentials.toml`, and `env` are denied. Deny rules take precedence.
+- At startup, optional user-local configuration can disable named default
+  profiles or add writable roots. Tilde expansion, absolute resolution,
+  canonicalization, and deduplication happen once; the resolved caller policy
+  is shared by the runtime and native mutation boundary. Runtime-owned
+  housekeeping paths required by `@anthropic-ai/sandbox-runtime` (for example,
+  `/tmp/claude`) are explicitly outside this cross-surface parity contract.
+- The `runtime-home` profile incorporates the runtime's implicit
+  `~/.npm/_logs` and `~/.claude/debug` convenience paths into the shared
+  policy. Disabling that profile adds explicit denies for both paths.
 
 ## 3. Approval authorities
 
@@ -68,9 +79,12 @@ For ordinary bash commands:
    sandbox result without approval.
 5. If it has a violation, apply the capability policy and request approval when
    policy permits asking.
-6. A sandbox-capability response retries in the sandbox with the approved,
+6. If any filesystem-write candidate intersects a configured deny root, do not
+   offer sandbox-capability approval: deny rules would make the retry
+   ineffective. The approval surface may offer exact-command host replay only.
+7. A sandbox-capability response retries in the sandbox with the approved,
    canonical capability resource.
-7. A host-command response replays the exact command on the host.
+8. A host-command response replays the exact command on the host.
 
 The command has already been attempted before a replay choice; a replay can
 repeat side effects permitted before the violation. Trusted pure Skill helpers
@@ -83,8 +97,8 @@ ancestor, canonicalizing paths to prevent symlink escape.
 
 ```text
 canonical target
-  → inside writable roots → execute
-  → outside writable roots → preflight sandbox-capability approval
+  → inside an allow root and outside every deny root → execute
+  → otherwise → preflight sandbox-capability approval
 ```
 
 No host-command approval is offered for native `write` or `edit`. If preflight
@@ -236,3 +250,23 @@ not weaken or choose the security boundary.
 - It does not broaden native write/edit to host execution.
 - It does not implement command-prefix or executable-name allowlists for host
   execution.
+
+## 17. Filesystem configuration
+
+The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json`:
+
+```json
+{
+  "filesystem": {
+    "extraWritableRoots": ["~/.cache/uv"],
+    "disabledDefaultProfiles": ["cargo-cache"]
+  }
+}
+```
+
+The built-in profiles are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. Extra writable
+roots widen only the sandbox filesystem policy. They never grant host replay.
+A missing configuration file uses defaults. An existing malformed file,
+invalid field, or unknown disabled profile is reported diagnostically and
+produces a deny-by-default caller write policy. Replacement tools are still
+registered, so invalid configuration cannot restore Pi's unsandboxed tools.

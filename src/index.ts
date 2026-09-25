@@ -8,3 +8,5 @@ export * from "./project-grants.js";
 export * from "./session-host-command-grants.js";
 export * from "./project-host-command-grants.js";
 export * from "./project-identity.js";
+export * from "./config.js";
+export * from "./filesystem-policy.js";

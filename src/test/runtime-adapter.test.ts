@@ -10,17 +10,24 @@ test("Ubuntu 24.x release detection is narrow", () => {
 });
 
 test("normal platforms retain Unix-socket isolation", () => {
-  const config = buildSandboxRuntimeConfig({ cwd: "/project" });
+  const config = buildSandboxRuntimeConfig({ cwd: "/project", writePolicy: { allow: ["/project"], deny: [] } });
   assert.equal(config.network.allowAllUnixSockets, undefined);
 });
 
 test("Ubuntu 24.x exception disables only Unix-socket isolation", () => {
-  const normal = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"] });
-  const ubuntu24 = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"] }, true);
+  const settings = { cwd: "/project", allowRead: ["/read"], writePolicy: { allow: ["/write"], deny: ["/write/secret"] } };
+  const normal = buildSandboxRuntimeConfig(settings);
+  const ubuntu24 = buildSandboxRuntimeConfig(settings, true);
   assert.equal(ubuntu24.network.allowAllUnixSockets, true);
   assert.deepEqual(ubuntu24.filesystem, normal.filesystem);
   assert.deepEqual(ubuntu24.network.allowedDomains, normal.network.allowedDomains);
   assert.deepEqual(ubuntu24.network.deniedDomains, normal.network.deniedDomains);
+});
+
+test("resolved write policy preserves deny roots", () => {
+  const config = buildSandboxRuntimeConfig({ cwd: "/project", writePolicy: { allow: ["/write"], deny: ["/write/secret"] } });
+  assert.deepEqual(config.filesystem.allowWrite, ["/write"]);
+  assert.deepEqual(config.filesystem.denyWrite, ["/write/secret"]);
 });
 
 test("nested-userns failure has actionable fail-closed diagnostics", () => {
