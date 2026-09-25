@@ -27,8 +27,13 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   `credentials.toml`, and `env` are denied. Deny rules take precedence.
 - At startup, optional user-local configuration can disable named default
   profiles or add writable roots. Tilde expansion, absolute resolution,
-  canonicalization, and deduplication happen once; the exact resolved policy
-  instance is shared by the runtime and native mutation boundary.
+  canonicalization, and deduplication happen once; the resolved caller policy
+  is shared by the runtime and native mutation boundary. Runtime-owned
+  housekeeping paths required by `@anthropic-ai/sandbox-runtime` (for example,
+  `/tmp/claude`) are explicitly outside this cross-surface parity contract.
+- The `runtime-home` profile incorporates the runtime's implicit
+  `~/.npm/_logs` and `~/.claude/debug` convenience paths into the shared
+  policy. Disabling that profile adds explicit denies for both paths.
 
 ## 3. Approval authorities
 
@@ -74,9 +79,12 @@ For ordinary bash commands:
    sandbox result without approval.
 5. If it has a violation, apply the capability policy and request approval when
    policy permits asking.
-6. A sandbox-capability response retries in the sandbox with the approved,
+6. If any filesystem-write candidate intersects a configured deny root, do not
+   offer sandbox-capability approval: deny rules would make the retry
+   ineffective. The approval surface may offer exact-command host replay only.
+7. A sandbox-capability response retries in the sandbox with the approved,
    canonical capability resource.
-7. A host-command response replays the exact command on the host.
+8. A host-command response replays the exact command on the host.
 
 The command has already been attempted before a replay choice; a replay can
 repeat side effects permitted before the violation. Trusted pure Skill helpers
@@ -256,7 +264,9 @@ The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json
 }
 ```
 
-The built-in profiles are `workspace`, `tmp`, and `cargo-cache`. Extra writable
+The built-in profiles are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. Extra writable
 roots widen only the sandbox filesystem policy. They never grant host replay.
-Missing or malformed configuration uses defaults; malformed configuration is
-reported diagnostically. Unknown disabled profile names have no effect.
+A missing configuration file uses defaults. An existing malformed file,
+invalid field, or unknown disabled profile is reported diagnostically and
+produces a deny-by-default caller write policy. Replacement tools are still
+registered, so invalid configuration cannot restore Pi's unsandboxed tools.

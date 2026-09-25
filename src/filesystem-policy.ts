@@ -41,6 +41,9 @@ export async function resolveWritePolicy(options: { cwd: string; config: Selecti
     allow.push(cargoHome);
     deny.push(...["bin", "config", "config.toml", "credentials", "credentials.toml", "env"].map(name => join(cargoHome, name)));
   }
+  const runtimeHomePaths = [join(home, ".npm", "_logs"), join(home, ".claude", "debug")];
+  if (!disabled.has("runtime-home")) allow.push(...runtimeHomePaths);
+  else deny.push(...runtimeHomePaths);
   allow.push(...options.config.filesystem.extraWritableRoots.map(path => expandPath(path, options.cwd, home)));
   return {
     allow: unique(await Promise.all(allow.map(path => canonicalPath(expandPath(path, options.cwd, home))))),

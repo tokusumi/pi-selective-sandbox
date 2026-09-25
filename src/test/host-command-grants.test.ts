@@ -113,3 +113,15 @@ test("uncanonicalizable cwd offers host once but never reusable host scopes", as
   assert.ok(!choices[0].includes("Run command on host for session"));
   assert.ok(!choices[0].includes("Run command on host for project"));
 });
+
+test("a deny-root violation offers host replay only", async () => {
+  const seen: { message: string; choices: string[] }[] = [];
+  const provider = createApprovalProvider({
+    hasUI: true, sessionManager: { getSessionId: () => "A" },
+    ui: { select: async (message, choices) => { seen.push({ message, choices }); return "Run command on host once"; } }
+  }, new SessionGrantStore(), undefined, new SessionHostCommandGrantStore());
+  assert.equal(await provider.request({ ...escalation(command()), capabilities: [] }), "host-allow-once");
+  assert.deepEqual(seen[0].choices, ["Run command on host once", "Run command on host for session", "Deny"]);
+  assert.match(seen[0].message, /configured deny root/);
+  assert.ok(!seen[0].choices.some(choice => choice.includes("sandbox")));
+});
