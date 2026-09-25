@@ -1,32 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSandboxRuntimeConfig, parseLinuxSandboxMode, sandboxInitializationError } from "../runtime-adapter.js";
+import { buildSandboxRuntimeConfig, isUbuntu24Release, sandboxInitializationError } from "../runtime-adapter.js";
 
-test("Linux sandbox mode defaults to Ubuntu-compatible", () => {
-  assert.equal(parseLinuxSandboxMode(undefined), "ubuntu-compatible");
+test("Ubuntu 24.x release detection is narrow", () => {
+  assert.equal(isUbuntu24Release('NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="24.04"\n'), true);
+  assert.equal(isUbuntu24Release('ID=ubuntu\nVERSION_ID="24.10"\n'), true);
+  assert.equal(isUbuntu24Release('ID=ubuntu\nVERSION_ID="22.04"\n'), false);
+  assert.equal(isUbuntu24Release('ID=debian\nVERSION_ID="24"\n'), false);
 });
 
-test("strict mode retains Unix-socket isolation", () => {
-  const config = buildSandboxRuntimeConfig({ cwd: "/project", linuxSandboxMode: "strict" });
+test("normal platforms retain Unix-socket isolation", () => {
+  const config = buildSandboxRuntimeConfig({ cwd: "/project" });
   assert.equal(config.network.allowAllUnixSockets, undefined);
 });
 
-test("Ubuntu-compatible mode explicitly disables Unix-socket isolation only", () => {
-  const strict = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"], linuxSandboxMode: "strict" });
-  const compatible = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"], linuxSandboxMode: "ubuntu-compatible" });
-  assert.equal(compatible.network.allowAllUnixSockets, true);
-  assert.deepEqual(compatible.filesystem, strict.filesystem);
-  assert.deepEqual(compatible.network.allowedDomains, strict.network.allowedDomains);
-  assert.deepEqual(compatible.network.deniedDomains, strict.network.deniedDomains);
+test("Ubuntu 24.x exception disables only Unix-socket isolation", () => {
+  const normal = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"] });
+  const ubuntu24 = buildSandboxRuntimeConfig({ cwd: "/project", allowRead: ["/read"], allowWrite: ["/write"] }, true);
+  assert.equal(ubuntu24.network.allowAllUnixSockets, true);
+  assert.deepEqual(ubuntu24.filesystem, normal.filesystem);
+  assert.deepEqual(ubuntu24.network.allowedDomains, normal.network.allowedDomains);
+  assert.deepEqual(ubuntu24.network.deniedDomains, normal.network.deniedDomains);
 });
 
-test("unknown modes fail closed instead of weakening isolation", () => {
-  assert.throws(() => parseLinuxSandboxMode("compatible"), /Invalid Linux sandbox mode/);
-});
-
-test("known strict nested-userns failure has actionable diagnostics", () => {
-  const message = sandboxInitializationError(new Error("apply-seccomp: creating nested user namespace: Operation not permitted"), "strict");
-  assert.match(message, /Strict Linux sandbox is unavailable/);
-  assert.match(message, /Ubuntu-compatible/);
+test("nested-userns failure has actionable fail-closed diagnostics", () => {
+  const message = sandboxInitializationError(new Error("apply-seccomp: creating nested user namespace: Operation not permitted"));
+  assert.match(message, /nested user namespace/);
   assert.match(message, /Host execution was not attempted/);
 });

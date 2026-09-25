@@ -11,8 +11,7 @@ this specification governs the intended behavior.
 - Ordinary command failure never implies escalation.
 - Sandbox unavailability never silently falls back to host execution.
 - An approval grants only the authority described by its grant type and scope.
-- The active sandbox mode and its isolation properties must be visible and
-  deterministic; the runtime must never switch modes based on host detection.
+- Platform-specific isolation properties must be documented and deterministic.
 
 ## 2. Execution surfaces
 
@@ -27,10 +26,9 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
 
 ## 3. Approval authorities
 
-Sandbox mode, sandbox widening, and host replay are separate concepts. Sandbox
-mode selects the baseline isolation capabilities. Sandbox widening adds a
-resource-specific capability inside that baseline. Host replay authorizes an
-exact command to run outside it.
+Platform baseline isolation, sandbox widening, and host replay are separate
+concepts. Sandbox widening adds a resource-specific capability inside the
+platform baseline. Host replay authorizes an exact command to run outside it.
 
 There are two deliberately separate authorities:
 
@@ -152,22 +150,21 @@ repository does not inherit its project grants.
 
 ## 11. Linux telemetry semantics
 
-### Linux backend capabilities
+### Platform capabilities
 
-| Mode | Filesystem | Network namespace | Unix sockets | Fail closed |
+| Platform | Filesystem | Network namespace | Unix sockets | Fail closed |
 | --- | --- | --- | --- | --- |
-| `strict` | Yes | Yes | Restricted | Yes |
-| `ubuntu-compatible` | Yes | Yes | Unrestricted | Yes |
+| macOS | Isolated | Isolated | Isolated | Yes |
+| Linux | Isolated | Isolated | Isolated | Yes |
+| Ubuntu 24.x | Isolated | Isolated | Unrestricted | Yes |
 
-`ubuntu-compatible` is the default for hosts where the nested user namespace
-needed by the runtime's seccomp-based Unix socket isolation may be blocked.
-`strict` is an explicit opt-in to Unix-socket isolation. Compatibility mode
-sets `network.allowAllUnixSockets: true`; it
-does not change filesystem permissions, network-namespace isolation, violation
-handling, sandbox widening, or the approval model. It is not host replay:
-filesystem and network sandboxing still run inside Bubblewrap. The extension
-does not detect Ubuntu or AppArmor and switch modes automatically; omitted
-configuration always resolves to `ubuntu-compatible`.
+Ubuntu 24.x is detected from `/etc/os-release` and receives one compatibility
+exception: `network.allowAllUnixSockets: true`. Its AppArmor policy can allow
+the outer Bubblewrap sandbox while blocking the nested user namespace used by
+the runtime's seccomp-based Unix-socket isolation. The exception does not
+change filesystem permissions, network-namespace isolation, violation
+handling, sandbox widening, or the approval model. It is not host replay;
+filesystem and network sandboxing continue inside Bubblewrap.
 
 On Linux, an observer path is a candidate resource, not an authoritative
 kernel-denied resource. The candidate can be canonicalized on the host and
@@ -224,7 +221,7 @@ failure deny the relevant reusable authorization. Unknown or unapproved
 violations do not receive implicit host fallback.
 
 When available error details identify Bubblewrap, AppArmor/user-namespace
-policy, or the strict mode's nested-userns/seccomp restriction, the unavailable
+policy, or a nested-userns/seccomp restriction, the unavailable
 result describes that class and the relevant operator action. Diagnostics do
 not weaken or choose the security boundary.
 

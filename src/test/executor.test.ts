@@ -90,7 +90,7 @@ test("sandbox initialization failure never falls back to host execution", async 
 
 test("classified initialization failure remains fail closed", async () => {
   const f = fixtures();
-  const diagnostic = "Strict Linux sandbox is unavailable because nested user namespaces are blocked. Host execution was not attempted.";
+  const diagnostic = "Linux sandbox is unavailable because nested user namespaces are blocked. Host execution was not attempted.";
   const executor = new SelectiveSandboxExecutor({ runner: f.runner, policy: new CapabilityPolicy([]), sandboxUnavailableMessage: diagnostic });
   const output = await executor.execute("cargo test", "strict-unavailable");
   assert.equal(output.disposition, "sandbox-unavailable");

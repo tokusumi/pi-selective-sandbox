@@ -1,19 +1,25 @@
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { readFile } from "node:fs/promises";
 import { defaultWritableRoots } from "./filesystem-boundary.js";
 import type { SandboxRuntime, SandboxViolation } from "./types.js";
 
-export const LINUX_SANDBOX_MODES = ["strict", "ubuntu-compatible"] as const;
-export type LinuxSandboxMode = typeof LINUX_SANDBOX_MODES[number];
-export type SandboxSettings = { cwd: string; linuxSandboxMode?: LinuxSandboxMode; allowWrite?: readonly string[]; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
+export type SandboxSettings = { cwd: string; allowWrite?: readonly string[]; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
-export function parseLinuxSandboxMode(value: unknown): LinuxSandboxMode {
-  if (value === undefined || value === "ubuntu-compatible") return "ubuntu-compatible";
-  if (value === "strict") return "strict";
-  throw new Error(`Invalid Linux sandbox mode: ${String(value)}. Expected strict or ubuntu-compatible.`);
+export function isUbuntu24Release(osRelease: string): boolean {
+  const values = new Map(osRelease.split("\n").map(line => {
+    const separator = line.indexOf("=");
+    if (separator < 0) return [line, ""];
+    return [line.slice(0, separator), line.slice(separator + 1).replace(/^["']|["']$/g, "")];
+  }));
+  return values.get("ID")?.toLowerCase() === "ubuntu" && /^24(?:\.|$)/.test(values.get("VERSION_ID") ?? "");
 }
 
-export function buildSandboxRuntimeConfig(settings: SandboxSettings): SandboxRuntimeConfig {
-  const mode = parseLinuxSandboxMode(settings.linuxSandboxMode);
+export async function isUbuntu24(osReleasePath = "/etc/os-release"): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  try { return isUbuntu24Release(await readFile(osReleasePath, "utf8")); } catch { return false; }
+}
+
+export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUnixSockets = false): SandboxRuntimeConfig {
   return {
     filesystem: {
       // Runtime reads are broad by default; credential visibility is handled at the model boundary.
@@ -23,15 +29,15 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings): SandboxRun
     network: {
       // GitHub CLI remains usable with its normal credential helpers.
       allowedDomains: [...(settings.allowedDomains ?? ["api.github.com", "github.com", "*.github.com"])], deniedDomains: [],
-      ...(mode === "ubuntu-compatible" ? { allowAllUnixSockets: true } : {})
+      ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
   };
 }
 
-export function sandboxInitializationError(error: unknown, mode: LinuxSandboxMode): string {
+export function sandboxInitializationError(error: unknown): string {
   const detail = error instanceof Error ? `${error.message}\n${error.cause instanceof Error ? error.cause.message : ""}` : String(error);
-  if (mode === "strict" && /apply-seccomp|seccomp|nested.{0,20}(user namespace|userns)|user namespace.{0,20}(denied|not permitted|operation not permitted)/is.test(detail)) {
-    return "Strict Linux sandbox is unavailable because the host blocks the nested user namespace required for Unix-socket isolation. Use the documented Ubuntu-compatible mode if accepting loss of Unix-socket isolation. Host execution was not attempted.";
+  if (/apply-seccomp|seccomp|nested.{0,20}(user namespace|userns)|user namespace.{0,20}(denied|not permitted|operation not permitted)/is.test(detail)) {
+    return "Linux sandbox is unavailable because the host blocks the nested user namespace required for Unix-socket isolation. Host execution was not attempted.";
   }
   if (/apparmor|unprivileged_userns|user namespace|userns/i.test(detail)) {
     return "Linux sandbox is unavailable because Bubblewrap is blocked by the host AppArmor/user-namespace policy. Host execution was not attempted.";
@@ -59,9 +65,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   private constructor(private readonly settings: SandboxSettings) {}
 
   static async initialize(settings: SandboxSettings): Promise<AnthropicSandboxRuntime> {
-    const normalized = { ...settings, linuxSandboxMode: parseLinuxSandboxMode(settings.linuxSandboxMode) };
-    await SandboxManager.initialize(buildSandboxRuntimeConfig(normalized));
-    return new AnthropicSandboxRuntime(normalized);
+    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, await isUbuntu24()));
+    return new AnthropicSandboxRuntime(settings);
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {

@@ -5,16 +5,12 @@ import selectiveSandboxExtension, { emitExecutorOutput, redactToolResult } from 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   const tools: { name: string }[] = [];
   const events: string[] = [];
-  const flags: { name: string; default?: string }[] = [];
   await selectiveSandboxExtension({
     on: (event: string) => { events.push(event); },
-    registerTool: (value: { name: string }) => { tools.push(value); },
-    registerFlag: (name: string, options: { default?: string }) => { flags.push({ name, default: options.default }); },
-    getFlag: () => "strict"
+    registerTool: (value: { name: string }) => { tools.push(value); }
   } as never);
   assert.deepEqual(tools.map(tool => tool.name), ["bash", "write", "edit"]);
   assert.deepEqual(events, ["session_shutdown"]);
-  assert.deepEqual(flags, [{ name: "linux-sandbox-mode", default: "ubuntu-compatible" }]);
 });
 
 test("package manifest exposes the compiled Pi extension", async () => {
@@ -43,7 +39,7 @@ test("executor-generated fail-closed messages are emitted to Pi", () => {
 
 test("write fails closed without an interactive approval UI", async () => {
   const tools: unknown[] = [];
-  await selectiveSandboxExtension({ on: () => undefined, registerTool: (tool: unknown) => { tools.push(tool); }, registerFlag: () => undefined, getFlag: () => "strict" } as never);
+  await selectiveSandboxExtension({ on: () => undefined, registerTool: (tool: unknown) => { tools.push(tool); } } as never);
   const write = tools.find((tool: any) => tool.name === "write") as any;
   await assert.rejects(write.execute("no-ui", { path: "/var/pi-selective-denied/file.txt", content: "no" }, new AbortController().signal, () => {}));
 });
