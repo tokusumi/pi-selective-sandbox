@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
-import { AnthropicSandboxRuntime } from "./runtime-adapter.js";
+import { AnthropicSandboxRuntime, parseLinuxSandboxMode, sandboxInitializationError } from "./runtime-adapter.js";
 import { defaultWritableRoots, MutationBoundary } from "./filesystem-boundary.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
@@ -126,6 +126,12 @@ export function createApprovalProvider(
 
 /** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
 export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
+  pi.registerFlag("linux-sandbox-mode", {
+    description: "Linux sandbox mode: ubuntu-compatible (default; allows all Unix sockets) or strict",
+    type: "string",
+    default: "ubuntu-compatible"
+  });
+  const linuxSandboxMode = parseLinuxSandboxMode(pi.getFlag("linux-sandbox-mode"));
   const cwd = process.cwd();
   const grants = new SessionGrantStore();
   const hostGrants = new SessionHostCommandGrantStore();
@@ -137,10 +143,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   const project = projectId && projectGrants && projectHostGrants ? { projectId, grants: projectGrants, hostGrants: projectHostGrants } : undefined;
   const writableRoots = defaultWritableRoots(cwd);
   let runtime: AnthropicSandboxRuntime | undefined;
+  let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, allowWrite: writableRoots }).then(value => { runtime = value; });
-    try { await initialization; } catch { runtime = undefined; }
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, allowWrite: writableRoots, linuxSandboxMode }).then(value => { runtime = value; });
+    try { await initialization; } catch (error) { runtime = undefined; sandboxUnavailableMessage = sandboxInitializationError(error, linuxSandboxMode); }
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
   const localBash = createBashTool(cwd);
@@ -158,6 +165,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
             };
             const executor = new SelectiveSandboxExecutor({
               runtime,
+              sandboxUnavailableMessage: sandboxUnavailableMessage ?? (error => sandboxInitializationError(error, linuxSandboxMode)),
               runner,
               policy: new CapabilityPolicy([], "ask"),
               approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project, hostGrants),

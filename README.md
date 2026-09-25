@@ -60,7 +60,37 @@ For `write` and `edit`, a canonical target inside configured writable roots exec
 
 ## Platform notes
 
+| Platform / environment | Recommended mode | Notes |
+| --- | --- | --- |
+| macOS | default | Native sandbox |
+| Linux with full Bubblewrap support | `strict` | Full Linux isolation |
+| Ubuntu 24.04 + restrictive AppArmor | `ubuntu-compatible` | Unix socket isolation unavailable |
+| Bubblewrap unavailable | unsupported | No automatic host fallback |
+
+Linux defaults to `ubuntu-compatible`, which keeps Bubblewrap filesystem and
+network-namespace isolation but leaves Unix sockets unrestricted. To opt into
+Unix-socket isolation on a host that supports nested user namespaces, use:
+
+```sh
+pi --linux-sandbox-mode strict
+```
+
+The default remains sandboxed; it is not a resource widening approval or host
+replay. Selecting `strict` adds Unix-socket isolation and continues to fail
+closed if the host cannot provide it.
+
 The OS sandbox runtime remains the enforcement authority. On Linux, observer paths are candidate resources, not authoritative kernel-denial claims. A candidate may be canonicalized on the host and offered for sandbox widening; the widened sandbox still decides enforcement. For host replay, the candidate path is explanatory only: approval is command-scoped and is not a host resource permission. Linux and macOS do not need identical internal telemetry to retain this separation.
+
+### Ubuntu 24.04 troubleshooting
+
+On Ubuntu 24.04 with restrictive AppArmor, install the distribution's
+`apparmor-profiles` package and enable the `bwrap-userns-restrict` profile so
+the outer Bubblewrap sandbox can start. Strict mode can still fail when
+`apply-seccomp` attempts the nested user namespace used for Unix-socket
+isolation. If that occurs, use the default `ubuntu-compatible` mode, accepting
+that processes in the sandbox can access Unix sockets, or keep explicitly
+selected strict fail-closed behavior. The extension never changes AppArmor or
+sysctls for you.
 
 ## Persistent approvals
 

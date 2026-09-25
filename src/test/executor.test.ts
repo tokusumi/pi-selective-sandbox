@@ -88,6 +88,31 @@ test("sandbox initialization failure never falls back to host execution", async 
   assert.equal(f.calls.sandbox + f.calls.elevated, 0);
 });
 
+test("classified initialization failure remains fail closed", async () => {
+  const f = fixtures();
+  const diagnostic = "Strict Linux sandbox is unavailable because nested user namespaces are blocked. Host execution was not attempted.";
+  const executor = new SelectiveSandboxExecutor({ runner: f.runner, policy: new CapabilityPolicy([]), sandboxUnavailableMessage: diagnostic });
+  const output = await executor.execute("cargo test", "strict-unavailable");
+  assert.equal(output.disposition, "sandbox-unavailable");
+  assert.equal(output.stderr, diagnostic);
+  assert.equal(f.calls.sandbox + f.calls.elevated + f.calls.approvals, 0);
+});
+
+test("sandbox wrapping failure can be classified without host fallback", async () => {
+  const f = fixtures();
+  f.runtime.wrap = async () => { throw new Error("apply-seccomp: Operation not permitted"); };
+  const executor = new SelectiveSandboxExecutor({
+    runtime: f.runtime,
+    runner: f.runner,
+    policy: new CapabilityPolicy([]),
+    sandboxUnavailableMessage: error => `classified: ${error instanceof Error ? error.message : "unknown"}`
+  });
+  const output = await executor.execute("cargo test", "wrap-unavailable");
+  assert.equal(output.disposition, "sandbox-unavailable");
+  assert.match(output.stderr, /classified: apply-seccomp/);
+  assert.equal(f.calls.sandbox + f.calls.elevated + f.calls.approvals, 0);
+});
+
 test("redaction occurs before results are returned", async () => {
   const f = fixtures();
   f.runner.runSandbox = async () => result(0, "ghp_verysecret");
