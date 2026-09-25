@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
-import { AnthropicSandboxRuntime } from "./runtime-adapter.js";
+import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-adapter.js";
 import { defaultWritableRoots, MutationBoundary } from "./filesystem-boundary.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
@@ -137,10 +137,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   const project = projectId && projectGrants && projectHostGrants ? { projectId, grants: projectGrants, hostGrants: projectHostGrants } : undefined;
   const writableRoots = defaultWritableRoots(cwd);
   let runtime: AnthropicSandboxRuntime | undefined;
+  let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
     initialization ??= AnthropicSandboxRuntime.initialize({ cwd, allowWrite: writableRoots }).then(value => { runtime = value; });
-    try { await initialization; } catch { runtime = undefined; }
+    try { await initialization; } catch (error) { runtime = undefined; sandboxUnavailableMessage = sandboxInitializationError(error); }
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
   const localBash = createBashTool(cwd);
@@ -158,6 +159,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
             };
             const executor = new SelectiveSandboxExecutor({
               runtime,
+              sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),
               approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project, hostGrants),

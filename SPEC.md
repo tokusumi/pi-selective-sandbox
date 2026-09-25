@@ -11,6 +11,7 @@ this specification governs the intended behavior.
 - Ordinary command failure never implies escalation.
 - Sandbox unavailability never silently falls back to host execution.
 - An approval grants only the authority described by its grant type and scope.
+- Platform-specific isolation properties must be documented and deterministic.
 
 ## 2. Execution surfaces
 
@@ -24,6 +25,10 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   `/tmp`; the runtime and native boundary use the same default policy.
 
 ## 3. Approval authorities
+
+Platform baseline isolation, sandbox widening, and host replay are separate
+concepts. Sandbox widening adds a resource-specific capability inside the
+platform baseline. Host replay authorizes an exact command to run outside it.
 
 There are two deliberately separate authorities:
 
@@ -145,6 +150,22 @@ repository does not inherit its project grants.
 
 ## 11. Linux telemetry semantics
 
+### Platform capabilities
+
+| Platform | Filesystem | Network namespace | Unix sockets | Fail closed |
+| --- | --- | --- | --- | --- |
+| macOS | Isolated | Isolated | Isolated | Yes |
+| Linux | Isolated | Isolated | Isolated | Yes |
+| Ubuntu 24.x | Isolated | Isolated | Unrestricted | Yes |
+
+Ubuntu 24.x is detected from `/etc/os-release` and receives one compatibility
+exception: `network.allowAllUnixSockets: true`. Its AppArmor policy can allow
+the outer Bubblewrap sandbox while blocking the nested user namespace used by
+the runtime's seccomp-based Unix-socket isolation. The exception does not
+change filesystem permissions, network-namespace isolation, violation
+handling, sandbox widening, or the approval model. It is not host replay;
+filesystem and network sandboxing continue inside Bubblewrap.
+
 On Linux, an observer path is a candidate resource, not an authoritative
 kernel-denied resource. The candidate can be canonicalized on the host and
 proposed as a `SandboxCapabilityGrant`, because enforcement remains in the
@@ -198,6 +219,11 @@ and does not run the host command. Missing UI, missing eligible grant, malformed
 persistent grant data, unavailable project identity, and persistent-store write
 failure deny the relevant reusable authorization. Unknown or unapproved
 violations do not receive implicit host fallback.
+
+When available error details identify Bubblewrap, AppArmor/user-namespace
+policy, or a nested-userns/seccomp restriction, the unavailable
+result describes that class and the relevant operator action. Diagnostics do
+not weaken or choose the security boundary.
 
 ## 16. Non-goals / current limitations
 
