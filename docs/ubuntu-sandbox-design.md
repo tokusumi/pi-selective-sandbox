@@ -142,7 +142,7 @@ strace
 
 An earlier experiment also proved that tracing from inside Bubblewrap can observe the denied workload syscall. PR #11 deliberately uses the outer topology instead because it keeps the trace stream on a parent-owned pipe that the sandboxed workload cannot rewrite.
 
-Tracing Bubblewrap from the outside also exposes Bubblewrap setup syscalls, so the observer must attribute only the workload process tree and ignore setup activity. This attribution rule is part of the correctness boundary of the observer; path-based exclusions such as `/newroot` are only defense in depth and must not substitute for process attribution.
+Tracing Bubblewrap from the outside also exposes Bubblewrap setup syscalls, so the observer must attribute only the workload process tree and ignore setup activity. This attribution rule is part of the correctness boundary of the observer; path-based exclusions such as `/newroot` are only defense in depth and must not substitute for process attribution. Bubblewrap creates a PID namespace, so clone return values inside it can differ from the outer PIDs used by strace line prefixes. The observer requests `--decode-pids=pidns` and uses strace's outer-PID annotation to follow workload descendants.
 
 On the target Ubuntu host, a blocked Git write was observed as:
 

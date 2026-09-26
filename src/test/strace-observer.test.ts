@@ -19,7 +19,7 @@ function workload(observer: StraceViolationObserver, lines: string[]) {
     '100 execve("/usr/bin/bwrap", ["bwrap", "--ro-bind"], 0x0) = 0',
     '100 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 101',
     '101 execve("/usr/bin/bash", ["bash", "-c", "user command"], 0x0) = 0',
-    '101 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 102',
+    "101 clone(child_stack=NULL, flags=CLONE_VM|SIGCHLD) = 5 /* 102 in strace's PID NS */",
     ...lines
   ].join("\n") + "\n");
 }
@@ -37,6 +37,17 @@ test("bwrap setup EROFS is ignored; Git lock and child EROFS are attributed", as
   const violations = await observer.getViolations();
   assert.deepEqual(violations.map(v => v.resource), [join(blocked, "repo/.git")]);
   assert.match(violations[0].message ?? "", /index\.lock/);
+});
+
+test("bwrap EROFS outside /newroot is ignored after the workload starts", async () => {
+  const { blocked, observer } = await fixture();
+  workload(observer, [
+    `100 mkdirat(AT_FDCWD<${blocked}>, "bwrap-noise", 0777) = -1 EROFS (Read-only file system)`,
+    `102 mkdirat(AT_FDCWD<${blocked}>, "workload-write", 0777) = -1 EROFS (Read-only file system)`
+  ]);
+  const violations = await observer.getViolations();
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].message ?? "", /workload-write/);
 });
 
 test("relative dirfd, openat2 flags, and two-path mutations use the shared write policy", async () => {
@@ -120,6 +131,34 @@ test("existing files stay exact and deny carve-outs stay blocked from widening",
     `102 unlinkat(AT_FDCWD<${secret}>, "file", 0) = -1 EROFS (Read-only file system)`
   ]);
   assert.deepEqual((await carved.getViolations()).map(v => v.resource), [join(secret, "file")]);
+});
+
+test("the same leaf keeps both file and parent grant scopes", async () => {
+  const { blocked, observer } = await fixture();
+  const file = join(blocked, "file");
+  await writeFile(file, "x");
+  workload(observer, [
+    `102 chmod("${file}", 0600) = -1 EROFS (Read-only file system)`,
+    `102 unlink("${file}") = -1 EROFS (Read-only file system)`
+  ]);
+  assert.deepEqual((await observer.getViolations()).map(v => v.resource), [file, blocked]);
+});
+
+test("nofollow metadata on symlinks uses their entry instead of the target", async () => {
+  const { writable, blocked, observer } = await fixture();
+  await writeFile(join(writable, "target"), "x");
+  const paths = ["lchown", "fchownat", "utimensat"].map(name => join(blocked, name));
+  for (const path of paths) {
+    await mkdir(path);
+    await symlink(join(writable, "target"), join(path, "link"));
+  }
+  workload(observer, [
+    `102 lchown("${join(paths[0], "link")}", 1000, 1000) = -1 EROFS (Read-only file system)`,
+    `102 fchownat(AT_FDCWD<${paths[1]}>, "link", 1000, 1000, AT_SYMLINK_NOFOLLOW) = -1 EROFS (Read-only file system)`,
+    `102 utimensat(AT_FDCWD<${paths[2]}>, "link", NULL, AT_SYMLINK_NOFOLLOW) = -1 EROFS (Read-only file system)`,
+    `102 fchownat(AT_FDCWD<${paths[1]}>, "link", 1000, 1000, 0) = -1 EROFS (Read-only file system)`
+  ]);
+  assert.deepEqual((await observer.getViolations()).map(v => v.resource), paths);
 });
 
 test("directory-entry paths do not follow the final symlink", async () => {

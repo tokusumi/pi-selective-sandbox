@@ -18,13 +18,13 @@ const observedCalls: readonly string[] = [...commonCalls, ...(process.arch === "
 export const STRACE_BINARY = "/usr/bin/strace";
 
 export const STRACE_ARGS = [
-  "-f", "--seccomp-bpf", "-qq", "-yy", "-s", "4096",
+  "-f", "--seccomp-bpf", "--decode-pids=pidns", "-qq", "-yy", "-s", "4096",
   // Successful exec/fork calls identify the workload after bwrap setup. -Z
   // would hide those calls, so failure filtering happens in this parser.
   "-e", `trace=execve,execveat,clone,clone3,fork,vfork,chdir,fchdir,${observedCalls.join(",")}`
 ] as const;
 
-type GrantScope = "path" | "parent" | "parent-if-missing";
+type GrantScope = "path" | "nofollow-path" | "parent" | "parent-if-missing";
 type Attempt = { syscall: string; path: string; errno: "EROFS"; grantScope: GrantScope };
 const writeFlags = /(?:^|\W)(?:O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND)(?:$|\W)/;
 const processCalls = new Set(["clone", "clone3", "fork", "vfork"]);
@@ -32,6 +32,7 @@ const directoryEntryCalls = new Set([
   "unlinkat", "mkdirat", "mknodat", "symlinkat", "linkat", "renameat", "renameat2",
   "unlink", "rmdir", "rename", "link", "symlink", "mkdir", "mknod"
 ]);
+const nofollowMetadataCalls = new Set(["fchmodat", "fchmodat2", "fchownat", "utimensat"]);
 
 function argsOf(input: string): string[] {
   const args: string[] = [];
@@ -117,6 +118,7 @@ function writeTargets(syscall: string, args: string[], cwd?: string): { path: st
     paths.push(target(args[0], undefined, cwd));
   }
   const grantScope: GrantScope = directoryEntryCalls.has(syscall) ? "parent"
+    : syscall === "lchown" || (nofollowMetadataCalls.has(syscall) && args.some(arg => /(?:^|\W)AT_SYMLINK_NOFOLLOW(?:$|\W)/.test(arg))) ? "nofollow-path"
     : syscall === "creat" || ((syscall === "open" || syscall === "openat" || syscall === "openat2") && /(?:^|\W)O_CREAT(?:$|\W)/.test(args[syscall === "open" ? 1 : 2] ?? ""))
       ? "parent-if-missing" : "path";
   return paths.filter((path): path is string => path !== undefined).map(path => ({ path, grantScope }));
@@ -126,12 +128,11 @@ function writeTargets(syscall: string, args: string[], cwd?: string): { path: st
 export class StraceViolationObserver {
   private pending = "";
   private bwrapStarted = false;
-  private workloadStarted = false;
   private readonly workloadPids = new Set<number>();
   private readonly cwdByPid = new Map<number, string>();
   private readonly unfinished = new Map<number, { syscall: string; head: string }>();
   private readonly attempts: Attempt[] = [];
-  private readonly seenPaths = new Set<string>();
+  private readonly seenAttempts = new Set<string>();
 
   constructor(private readonly cwd: string, private readonly policy: WritePolicy) {}
 
@@ -172,9 +173,12 @@ export class StraceViolationObserver {
       const child = result.match(/^(\d+)\b/);
       if (child) {
         if (this.workloadPids.has(pid)) {
-          this.workloadPids.add(Number(child[1]));
+          // Inside bwrap's PID namespace, clone returns an inner PID while
+          // strace prefixes later syscalls with its own outer-namespace PID.
+          const tracedPid = Number(result.match(/\/\* (\d+) in strace's PID NS \*\//)?.[1] ?? child[1]);
+          this.workloadPids.add(tracedPid);
           const cwd = this.cwdByPid.get(pid);
-          if (cwd) this.cwdByPid.set(Number(child[1]), cwd);
+          if (cwd) this.cwdByPid.set(tracedPid, cwd);
         }
       }
       return;
@@ -186,7 +190,6 @@ export class StraceViolationObserver {
       if (!executable) return;
       if (/(?:^|\/)bwrap$/.test(executable)) this.bwrapStarted = true;
       else if (this.bwrapStarted && /(?:^|\/)bash$/.test(executable)) {
-        this.workloadStarted = true;
         this.workloadPids.add(pid);
         if (!this.cwdByPid.has(pid)) this.cwdByPid.set(pid, this.cwd);
       }
@@ -203,13 +206,14 @@ export class StraceViolationObserver {
       if (next) this.cwdByPid.set(pid, next);
       return;
     }
-    if (!this.workloadStarted || !observedCalls.includes(syscall)) return;
+    if (!isWorkloadProcess || !observedCalls.includes(syscall)) return;
     if (!/^-1 EROFS\b/.test(result)) return;
     for (const { path, grantScope } of writeTargets(syscall, argsOf(input), this.cwdByPid.get(pid))) {
       if (path === "/newroot" || path.startsWith("/newroot/")) continue;
       if (this.attempts.length >= 256) break;
-      if (this.seenPaths.has(path)) continue;
-      this.seenPaths.add(path);
+      const key = JSON.stringify([path, grantScope]);
+      if (this.seenAttempts.has(key)) continue;
+      this.seenAttempts.add(key);
       this.attempts.push({ syscall, path, errno: "EROFS", grantScope });
     }
   }
@@ -222,7 +226,8 @@ export class StraceViolationObserver {
     const seen = new Set<string>();
     for (const attempt of this.attempts) {
       try {
-        const target = attempt.grantScope === "parent" ? await boundary.resolveEntry(attempt.path) : await boundary.resolve(attempt.path);
+        const target = attempt.grantScope === "parent" || attempt.grantScope === "nofollow-path"
+          ? await boundary.resolveEntry(attempt.path) : await boundary.resolve(attempt.path);
         if (target.allowed) continue;
         let resource = target.canonical;
         if (!target.denied && attempt.grantScope !== "path") {
@@ -232,6 +237,10 @@ export class StraceViolationObserver {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
               needsParent = true;
             }
+          }
+          if (attempt.grantScope === "nofollow-path") {
+            try { needsParent = (await lstat(target.canonical)).isSymbolicLink(); }
+            catch { continue; }
           }
           if (needsParent) resource = dirname(target.canonical);
         }

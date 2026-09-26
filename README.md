@@ -90,9 +90,10 @@ the runtime's Unix-socket isolation. This does not disable Bubblewrap
 filesystem or network-namespace isolation and is not host replay.
 
 Ubuntu 24.x also requires `strace` for filesystem violation observation. The
-extension checks that tracing works at startup. It traces the Bubblewrap
-command, ignores Bubblewrap setup calls, and attributes only failed write
-syscalls with `EROFS` against the existing write policy. Trace data is carried
+extension checks `strace` availability and basic ptrace operation at startup.
+It traces the Bubblewrap command, ignores Bubblewrap setup calls, and
+attributes only failed write syscalls with `EROFS` against the existing write
+policy. Trace data is carried
 on a parent-owned pipe; command output uses a separate pipe. If tracing cannot
 start, bash fails closed and never runs the command on the host automatically.
 For creation, deletion, and rename, a sandbox-widening request names the

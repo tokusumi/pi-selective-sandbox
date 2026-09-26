@@ -192,8 +192,10 @@ not grant host execution or widen the sandbox by itself.
 
 Directory-entry operations need a writable parent directory, so their
 resource candidate is that parent. An `open` with `O_CREAT` uses the parent
-only when the leaf is absent; existing files and metadata writes retain the
-exact file path. The original denied path remains diagnostic, and a path in a
+only when the leaf is absent; existing files and ordinary metadata writes retain
+the exact file path. Metadata calls that do not follow a final symlink resolve
+the symlink entry instead of its target and request the parent when the entry
+is a symlink. The original denied path remains diagnostic, and a path in a
 configured `denyWrite` carve-out still suppresses sandbox widening.
 
 On Linux, an observer path is a candidate resource, not an authoritative
