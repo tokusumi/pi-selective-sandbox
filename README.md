@@ -80,22 +80,23 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 | Platform | Filesystem | Network | Unix sockets |
 | --- | --- | --- | --- |
 | macOS | Isolated | Isolated | Isolated |
-| Linux | Isolated | Isolated | Isolated |
-| Ubuntu 24.x | Isolated | Isolated | Unrestricted |
+| Other Linux | Isolated | Isolated | Isolated |
+| Ubuntu | Isolated | Isolated | Unrestricted |
 
-Ubuntu 24.x is a known platform exception. The extension detects it from
-`/etc/os-release` and sets `network.allowAllUnixSockets: true`, because its
-restrictive AppArmor policy can block the nested user namespace required by
-the runtime's Unix-socket isolation. This does not disable Bubblewrap
-filesystem or network-namespace isolation and is not host replay.
+The extension detects Ubuntu from `ID=ubuntu` in `/etc/os-release` and sets
+`network.allowAllUnixSockets: true` for every Ubuntu release. Unix-socket
+isolation is not provided on this execution path. Bubblewrap still enforces
+filesystem and network-namespace isolation, and this mode is not host replay.
+On the tested Ubuntu 24.04 host, restrictive AppArmor policy blocks the nested
+user namespace that the runtime's Unix-socket isolation would require.
 
-Ubuntu 24.x also requires `strace` for filesystem violation observation. The
+Ubuntu also requires `strace` as its filesystem violation observer. The
 extension checks `strace` availability and basic ptrace operation at startup.
 It traces the Bubblewrap command, ignores Bubblewrap setup calls, and
 attributes only failed write syscalls with `EROFS` against the existing write
-policy. Trace data is carried
-on a parent-owned pipe; command output uses a separate pipe. If tracing cannot
-start, bash fails closed and never runs the command on the host automatically.
+policy. Trace data is carried on a parent-owned pipe; command output uses a
+separate pipe. If tracing cannot start, bash fails closed and never runs the
+command on the host automatically.
 For creation, deletion, and rename, a sandbox-widening request names the
 containing directory, because the new or removed entry cannot be made writable
 by granting its leaf path alone. The observed leaf remains in the diagnostic.
@@ -106,12 +107,11 @@ The OS sandbox runtime remains the enforcement authority. On Linux, observer pat
 
 On Ubuntu 24.04 with restrictive AppArmor, install the distribution's
 `apparmor-profiles` package and enable the `bwrap-userns-restrict` profile so
-the outer Bubblewrap sandbox can start. The runtime's normal Unix-socket
-isolation can still fail when `apply-seccomp` attempts the nested user namespace used for
-Unix-socket isolation. The Ubuntu 24.x compatibility exception avoids that operation
-by leaving Unix sockets unrestricted. The extension never changes AppArmor or
-sysctls for you. If Bubblewrap itself remains unavailable, execution fails
-closed without automatic host fallback.
+the outer Bubblewrap sandbox can start. The Ubuntu execution path leaves Unix
+sockets unrestricted and does not invoke the runtime's nested `apply-seccomp`
+helper. The extension never changes AppArmor or sysctls for you. If Bubblewrap
+itself remains unavailable, execution fails closed without automatic host
+fallback.
 
 ## Persistent approvals
 

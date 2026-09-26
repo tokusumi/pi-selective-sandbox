@@ -5,7 +5,8 @@ Scope: Linux/Ubuntu execution path in `pi-selective-sandbox`
 
 ## Decision
 
-On the target Ubuntu environment, `pi-selective-sandbox` uses Bubblewrap as the sandbox enforcement layer with:
+On every Ubuntu release identified by `ID=ubuntu` in `/etc/os-release`,
+`pi-selective-sandbox` uses Bubblewrap as the sandbox enforcement layer with:
 
 ```text
 allowAllUnixSockets = true

@@ -8,18 +8,18 @@ import type { SandboxRuntime, SandboxViolation } from "./types.js";
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
-export function isUbuntu24Release(osRelease: string): boolean {
+export function isUbuntuRelease(osRelease: string): boolean {
   const values = new Map(osRelease.split("\n").map(line => {
     const separator = line.indexOf("=");
     if (separator < 0) return [line, ""];
     return [line.slice(0, separator), line.slice(separator + 1).replace(/^["']|["']$/g, "")];
   }));
-  return values.get("ID")?.toLowerCase() === "ubuntu" && /^24(?:\.|$)/.test(values.get("VERSION_ID") ?? "");
+  return values.get("ID")?.toLowerCase() === "ubuntu";
 }
 
-export async function isUbuntu24(osReleasePath = "/etc/os-release"): Promise<boolean> {
+export async function isUbuntu(osReleasePath = "/etc/os-release"): Promise<boolean> {
   if (process.platform !== "linux") return false;
-  try { return isUbuntu24Release(await readFile(osReleasePath, "utf8")); } catch { return false; }
+  try { return isUbuntuRelease(await readFile(osReleasePath, "utf8")); } catch { return false; }
 }
 
 export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUnixSockets = false): SandboxRuntimeConfig {
@@ -73,13 +73,13 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean) {}
 
   static async initialize(settings: SandboxSettings): Promise<AnthropicSandboxRuntime> {
-    const ubuntu24 = await isUbuntu24();
-    if (ubuntu24) {
+    const ubuntu = await isUbuntu();
+    if (ubuntu) {
       try { await promisify(execFile)(STRACE_BINARY, [...STRACE_ARGS, "/usr/bin/true"], { timeout: 5000 }); }
-      catch (cause) { throw new Error("Ubuntu 24 filesystem observation requires working strace.", { cause }); }
+      catch (cause) { throw new Error("Ubuntu filesystem observation requires working strace.", { cause }); }
     }
-    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu24));
-    return new AnthropicSandboxRuntime(settings, ubuntu24);
+    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu));
+    return new AnthropicSandboxRuntime(settings, ubuntu);
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {

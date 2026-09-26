@@ -169,18 +169,19 @@ repository does not inherit its project grants.
 | Platform | Filesystem | Network namespace | Unix sockets | Fail closed |
 | --- | --- | --- | --- | --- |
 | macOS | Isolated | Isolated | Isolated | Yes |
-| Linux | Isolated | Isolated | Isolated | Yes |
-| Ubuntu 24.x | Isolated | Isolated | Unrestricted | Yes |
+| Other Linux | Isolated | Isolated | Isolated | Yes |
+| Ubuntu | Isolated | Isolated | Unrestricted | Yes |
 
-Ubuntu 24.x is detected from `/etc/os-release` and receives one compatibility
-exception: `network.allowAllUnixSockets: true`. Its AppArmor policy can allow
-the outer Bubblewrap sandbox while blocking the nested user namespace used by
-the runtime's seccomp-based Unix-socket isolation. The exception does not
-change filesystem permissions, network-namespace isolation, violation
-handling, sandbox widening, or the approval model. It is not host replay;
+Ubuntu is detected from `ID=ubuntu` in `/etc/os-release`, regardless of version,
+and uses `network.allowAllUnixSockets: true`. The tested Ubuntu 24.04 host's
+AppArmor policy allows the outer Bubblewrap sandbox while blocking the nested
+user namespace used by the runtime's seccomp-based Unix-socket isolation.
+This execution mode does not change filesystem permissions, network-namespace
+isolation, violation handling, sandbox widening, or the approval model. It is
+not host replay;
 filesystem and network sandboxing continue inside Bubblewrap.
 
-Because `allowAllUnixSockets` skips upstream seccomp observation, Ubuntu 24.x
+Because `allowAllUnixSockets` skips upstream seccomp observation, Ubuntu
 uses `strace` around Bubblewrap for filesystem telemetry. The tracer's stderr
 pipe belongs to the extension process; the traced command's stderr is routed
 to normal command output before Bubblewrap starts. The observer ignores

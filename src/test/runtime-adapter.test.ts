@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSandboxRuntimeConfig, isUbuntu24Release, sandboxInitializationError } from "../runtime-adapter.js";
+import { buildSandboxRuntimeConfig, isUbuntuRelease, sandboxInitializationError } from "../runtime-adapter.js";
 
-test("Ubuntu 24.x release detection is narrow", () => {
-  assert.equal(isUbuntu24Release('NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="24.04"\n'), true);
-  assert.equal(isUbuntu24Release('ID=ubuntu\nVERSION_ID="24.10"\n'), true);
-  assert.equal(isUbuntu24Release('ID=ubuntu\nVERSION_ID="22.04"\n'), false);
-  assert.equal(isUbuntu24Release('ID=debian\nVERSION_ID="24"\n'), false);
+test("Ubuntu release detection accepts all versions and excludes other distributions", () => {
+  assert.equal(isUbuntuRelease('NAME="Ubuntu"\nID=ubuntu\nVERSION_ID="22.04"\n'), true);
+  assert.equal(isUbuntuRelease('ID=ubuntu\nVERSION_ID="24.04"\n'), true);
+  assert.equal(isUbuntuRelease('ID=ubuntu\nVERSION_ID="26.04"\n'), true);
+  assert.equal(isUbuntuRelease('ID=ubuntu\n'), true);
+  assert.equal(isUbuntuRelease('ID=debian\nVERSION_ID="24"\n'), false);
+  assert.equal(isUbuntuRelease('ID=linuxmint\nID_LIKE="ubuntu debian"\n'), false);
 });
 
 test("normal platforms retain Unix-socket isolation", () => {
@@ -14,14 +16,14 @@ test("normal platforms retain Unix-socket isolation", () => {
   assert.equal(config.network.allowAllUnixSockets, undefined);
 });
 
-test("Ubuntu 24.x exception disables only Unix-socket isolation", () => {
+test("Ubuntu execution path disables only Unix-socket isolation", () => {
   const settings = { cwd: "/project", allowRead: ["/read"], writePolicy: { allow: ["/write"], deny: ["/write/secret"] } };
   const normal = buildSandboxRuntimeConfig(settings);
-  const ubuntu24 = buildSandboxRuntimeConfig(settings, true);
-  assert.equal(ubuntu24.network.allowAllUnixSockets, true);
-  assert.deepEqual(ubuntu24.filesystem, normal.filesystem);
-  assert.deepEqual(ubuntu24.network.allowedDomains, normal.network.allowedDomains);
-  assert.deepEqual(ubuntu24.network.deniedDomains, normal.network.deniedDomains);
+  const ubuntu = buildSandboxRuntimeConfig(settings, true);
+  assert.equal(ubuntu.network.allowAllUnixSockets, true);
+  assert.deepEqual(ubuntu.filesystem, normal.filesystem);
+  assert.deepEqual(ubuntu.network.allowedDomains, normal.network.allowedDomains);
+  assert.deepEqual(ubuntu.network.deniedDomains, normal.network.deniedDomains);
 });
 
 test("resolved write policy preserves deny roots", () => {
@@ -37,7 +39,7 @@ test("nested-userns failure has actionable fail-closed diagnostics", () => {
 });
 
 test("unavailable strace is reported without offering host execution", () => {
-  const message = sandboxInitializationError(new Error("Ubuntu 24 filesystem observation requires working strace."));
+  const message = sandboxInitializationError(new Error("Ubuntu filesystem observation requires working strace."));
   assert.match(message, /strace could not trace commands/);
   assert.match(message, /Host execution was not attempted/);
 });
