@@ -189,6 +189,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                 return capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
               },
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
+              onStatus: marker => emitSandboxStatus(marker, options.onData),
               redactor: { redact: text => redact_text(text).redacted }
             });
             const output = await executor.execute(command, id);
@@ -209,4 +210,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
 export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {
   if (output.stdout) onData(Buffer.from(output.stdout));
   if (output.stderr) onData(Buffer.from(output.stderr));
+}
+
+export function emitSandboxStatus(marker: string, onData: (chunk: Buffer) => void): void {
+  onData(Buffer.from(`\n${marker}\n`));
 }
