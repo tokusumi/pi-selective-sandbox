@@ -132,15 +132,19 @@ Therefore the Ubuntu execution mode requires an observer that is independent of 
 
 The project evaluated an independent syscall observer instead of inventing a ptrace implementation.
 
-The working topology is:
+The production topology in PR #11 is:
 
 ```text
-Bubblewrap
-  └─ strace
+strace
+  └─ Bubblewrap
        └─ user command and descendants
 ```
 
-This was validated on the target Ubuntu host. For example, a blocked Git write was observed as:
+An earlier experiment also proved that tracing from inside Bubblewrap can observe the denied workload syscall. PR #11 deliberately uses the outer topology instead because it keeps the trace stream on a parent-owned pipe that the sandboxed workload cannot rewrite.
+
+Tracing Bubblewrap from the outside also exposes Bubblewrap setup syscalls, so the observer must attribute only the workload process tree and ignore setup activity. This attribution rule is part of the correctness boundary of the observer; path-based exclusions such as `/newroot` are only defense in depth and must not substitute for process attribution.
+
+On the target Ubuntu host, a blocked Git write was observed as:
 
 ```text
 openat(
@@ -150,8 +154,6 @@ openat(
   0666
 ) = -1 EROFS
 ```
-
-Placing the observer inside Bubblewrap avoids Bubblewrap setup noise that appeared when tracing Bubblewrap from the outside.
 
 The write-intent syscall model should follow sandbox-runtime's existing `observe_calls[]` table rather than define an independent semantic model.
 
