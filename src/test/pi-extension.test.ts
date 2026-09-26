@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import selectiveSandboxExtension, { emitExecutorOutput, redactToolResult } from "../pi-extension.js";
+import selectiveSandboxExtension, { emitExecutorOutput, emitSandboxStatus, redactToolResult } from "../pi-extension.js";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   const tools: { name: string }[] = [];
@@ -35,6 +35,12 @@ test("executor-generated fail-closed messages are emitted to Pi", () => {
     chunk => chunks.push(chunk.toString())
   );
   assert.deepEqual(chunks, ["Sandbox unavailable; host execution was not attempted."]);
+});
+
+test("sandbox status markers stream as separate transcript lines", () => {
+  const chunks = ["fatal: Read-only file system"];
+  emitSandboxStatus("<sandbox: approval-required filesystem.write>", chunk => chunks.push(chunk.toString()));
+  assert.equal(chunks.join(""), "fatal: Read-only file system\n<sandbox: approval-required filesystem.write>\n");
 });
 
 test("write fails closed without an interactive approval UI", async () => {

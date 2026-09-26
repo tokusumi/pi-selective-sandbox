@@ -86,6 +86,16 @@ For ordinary bash commands:
    canonical capability resource.
 8. A host-command response replays the exact command on the host.
 
+All attempts may remain visible in the streamed execution transcript. Before
+requesting approval for a detected violation, the extension streams
+`<sandbox: approval-required filesystem.write>` (or the detected capability
+kind). Approval then streams `<sandbox: approved widen retry>`,
+`<sandbox: approved host-replay>`, or `<sandbox: approval-denied>`. An approved
+attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
+Only the final selected attempt determines the tool exit code; denial retains
+the initial sandbox exit code. Ordinary failures and sandbox successes have no
+status marker.
+
 The command has already been attempted before a replay choice; a replay can
 repeat side effects permitted before the violation. Trusted pure Skill helpers
 are the explicitly limited exception described in section 13.

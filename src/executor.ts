@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority } from "./types.js";
 
-export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
+export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
 const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redactor ? r : { ...r, stdout: redactor.redact(r.stdout), stderr: redactor.redact(r.stderr) };
 
@@ -25,13 +25,25 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(first, "denied", violations);
     const caps = wideningBlocked ? [] : prepared.filter(candidate => !stored.some(capability => capability.kind === candidate.kind && capability.resource === candidate.resource));
     const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
+    this.status(`approval-required ${violations[0].kind}`);
     const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
-    if (response === "host-allow-once" || response === "host-allow-session" || response === "host-allow-project") return this.finish(await runner.runHost(command), "host", violations);
-    if (response === "deny" || caps.length === 0) return this.finish(first, "denied", violations);
+    if (response === "host-allow-once" || response === "host-allow-session" || response === "host-allow-project") {
+      this.status("approved host-replay");
+      const replay = await runner.runHost(command);
+      this.status(`replay exit=${replay.exitCode}`);
+      return this.finish(replay, "host", violations);
+    }
+    if (response === "deny" || caps.length === 0) { this.status("approval-denied"); return this.finish(first, "denied", violations); }
+    this.status("approved widen retry");
     const widenedId = toolCallId + ":widened";
-    try { return this.finish(await this.runSandbox(command, widenedId, [...stored, ...caps]), "sandbox", violations); }
+    try {
+      const retry = await this.runSandbox(command, widenedId, [...stored, ...caps]);
+      this.status(`retry exit=${retry.exitCode}`);
+      return this.finish(retry, "sandbox", violations);
+    }
     finally { runtime.forgetCommand?.(widenedId); }
   }
+  private status(value: string): void { this.options.onStatus?.(`<sandbox: ${value}>`); }
   private async runSandbox(command: string, commandId: string, caps: readonly Capability[]): Promise<CommandResult> { const runtime = this.options.runtime!; const wrapped = await runtime.wrap(command, { commandId, commandText: command, cwd: this.options.cwd, extraCapabilities: caps }); return this.options.runner.runSandbox(wrapped, runtime.traceSinkForCommand?.(commandId)); }
   private unavailable(error?: unknown): ExecutionResult {
     const configured = this.options.sandboxUnavailableMessage;
