@@ -89,6 +89,16 @@ restrictive AppArmor policy can block the nested user namespace required by
 the runtime's Unix-socket isolation. This does not disable Bubblewrap
 filesystem or network-namespace isolation and is not host replay.
 
+Ubuntu 24.x also requires `strace` for filesystem violation observation. The
+extension checks that tracing works at startup. It traces the Bubblewrap
+command, ignores Bubblewrap setup calls, and attributes only failed write
+syscalls with `EROFS` against the existing write policy. Trace data is carried
+on a parent-owned pipe; command output uses a separate pipe. If tracing cannot
+start, bash fails closed and never runs the command on the host automatically.
+For creation, deletion, and rename, a sandbox-widening request names the
+containing directory, because the new or removed entry cannot be made writable
+by granting its leaf path alone. The observed leaf remains in the diagnostic.
+
 The OS sandbox runtime remains the enforcement authority. On Linux, observer paths are candidate resources, not authoritative kernel-denial claims. A candidate may be canonicalized on the host and offered for sandbox widening; the widened sandbox still decides enforcement. For host replay, the candidate path is explanatory only: approval is command-scoped and is not a host resource permission. Linux and macOS do not need identical internal telemetry to retain this separation.
 
 ### Ubuntu 24.04 troubleshooting

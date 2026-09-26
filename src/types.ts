@@ -19,12 +19,14 @@ export type CommandResult = {
 };
 
 export type SandboxRuntime = {
-  wrap(command: string, context: { commandId: string; commandText: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
-  getViolationsForCommand(commandId: string): readonly SandboxViolation[];
+  wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
+  getViolationsForCommand(commandId: string): readonly SandboxViolation[] | Promise<readonly SandboxViolation[]>;
+  traceSinkForCommand?(commandId: string): ((chunk: Buffer) => void) | undefined;
+  forgetCommand?(commandId: string): void;
 };
 
 export type CommandRunner = {
-  runSandbox(command: string): Promise<CommandResult>;
+  runSandbox(command: string, onTrace?: (chunk: Buffer) => void): Promise<CommandResult>;
   runHost(command: string): Promise<CommandResult>;
 };
 

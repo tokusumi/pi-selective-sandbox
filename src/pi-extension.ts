@@ -9,6 +9,7 @@ import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
+import { runTracedSandbox } from "./strace-runner.js";
 import { CapabilityPolicy } from "./policy.js";
 import { ProjectGrantStore } from "./project-grants.js";
 import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
@@ -166,11 +167,14 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
         operations: {
           async exec(command, commandCwd, options) {
             const runner: CommandRunner = {
-              runSandbox: wrapped => runCommand(localOperations, wrapped, commandCwd, options),
+              runSandbox: (wrapped, onTrace) => onTrace
+                ? runTracedSandbox(wrapped, commandCwd, { ...options, onData: chunk => options.onData(Buffer.from(redact_text(chunk.toString()).redacted)) }, onTrace)
+                : runCommand(localOperations, wrapped, commandCwd, options),
               runHost: raw => runCommand(localOperations, raw, commandCwd, options)
             };
             const executor = new SelectiveSandboxExecutor({
               runtime,
+              cwd: commandCwd,
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),

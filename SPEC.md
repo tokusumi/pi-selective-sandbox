@@ -180,6 +180,22 @@ change filesystem permissions, network-namespace isolation, violation
 handling, sandbox widening, or the approval model. It is not host replay;
 filesystem and network sandboxing continue inside Bubblewrap.
 
+Because `allowAllUnixSockets` skips upstream seccomp observation, Ubuntu 24.x
+uses `strace` around Bubblewrap for filesystem telemetry. The tracer's stderr
+pipe belongs to the extension process; the traced command's stderr is routed
+to normal command output before Bubblewrap starts. The observer ignores
+Bubblewrap setup syscalls, follows the workload and descendants, and reports
+only upstream write-intent syscall failures with `EROFS` whose resolved path
+is outside the effective `WritePolicy`. Missing or blocked `strace` makes bash
+unavailable. This telemetry only triggers the existing approval flow; it does
+not grant host execution or widen the sandbox by itself.
+
+Directory-entry operations need a writable parent directory, so their
+resource candidate is that parent. An `open` with `O_CREAT` uses the parent
+only when the leaf is absent; existing files and metadata writes retain the
+exact file path. The original denied path remains diagnostic, and a path in a
+configured `denyWrite` carve-out still suppresses sandbox widening.
+
 On Linux, an observer path is a candidate resource, not an authoritative
 kernel-denied resource. The candidate can be canonicalized on the host and
 proposed as a `SandboxCapabilityGrant`, because enforcement remains in the

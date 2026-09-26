@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { canonicalPath, type WritePolicy } from "./filesystem-policy.js";
 
 /** The single default write policy shared by subprocess and in-process tools. */
@@ -29,6 +29,17 @@ export class MutationBoundary {
 
   async resolve(requested: string): Promise<MutationTarget> {
     const canonical = await canonicalPath(resolve(this.cwd, requested));
+    return this.classify(requested, canonical);
+  }
+
+  /** Directory-entry syscalls mutate the parent, even when the leaf is a symlink. */
+  async resolveEntry(requested: string): Promise<MutationTarget> {
+    const absolute = resolve(this.cwd, requested);
+    const canonical = join(await canonicalPath(dirname(absolute)), basename(absolute));
+    return this.classify(requested, canonical);
+  }
+
+  private classify(requested: string, canonical: string): MutationTarget {
     const denied = this.deny.some(root => contains(root, canonical));
     const allowed = this.allow.some(root => contains(root, canonical)) && !denied;
     return { requested, canonical, allowed, denied };

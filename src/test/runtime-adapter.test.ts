@@ -35,3 +35,9 @@ test("nested-userns failure has actionable fail-closed diagnostics", () => {
   assert.match(message, /nested user namespace/);
   assert.match(message, /Host execution was not attempted/);
 });
+
+test("unavailable strace is reported without offering host execution", () => {
+  const message = sandboxInitializationError(new Error("Ubuntu 24 filesystem observation requires working strace."));
+  assert.match(message, /strace could not trace commands/);
+  assert.match(message, /Host execution was not attempted/);
+});

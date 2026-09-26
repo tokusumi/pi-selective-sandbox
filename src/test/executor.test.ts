@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { CapabilityPolicy } from "../policy.js";
 import { findTrustedHelper, splitPureInvocation } from "../skills.js";
+import { StraceViolationObserver } from "../strace-observer.js";
 import type { CommandResult, SandboxRuntime } from "../types.js";
 
 const result = (exitCode = 0, stdout = "ok", stderr = ""): CommandResult => ({ exitCode, stdout, stderr });
@@ -30,6 +31,43 @@ test("ordinary sandbox failure never requests approval", async () => {
   assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.approvals, 0);
   assert.equal(f.calls.elevated, 0);
+});
+
+test("trace observation reaches the existing host replay approval path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-executor-trace-"));
+  const writable = join(root, "writable"), blocked = join(root, "blocked");
+  await Promise.all([mkdir(writable), mkdir(blocked)]);
+  const observer = new StraceViolationObserver(writable, { allow: [writable], deny: [] });
+  const calls = { approval: 0, host: 0 };
+  const runtime: SandboxRuntime = {
+    wrap: async command => command,
+    traceSinkForCommand: () => chunk => observer.ingest(chunk),
+    getViolationsForCommand: () => observer.getViolations()
+  };
+  const executor = new SelectiveSandboxExecutor({
+    runtime, policy: new CapabilityPolicy([]),
+    runner: {
+      runSandbox: async (_command, onTrace) => {
+        onTrace?.(Buffer.from([
+          '1 execve("/usr/bin/bwrap", ["bwrap"], 0x0) = 0',
+          '1 clone(flags=SIGCHLD) = 2',
+          '2 execve("/usr/bin/bash", ["bash"], 0x0) = 0',
+          `2 openat(AT_FDCWD<${blocked}>, "file", O_WRONLY|O_CREAT, 0666) = -1 EROFS (Read-only file system)`
+        ].join("\n") + "\n"));
+        return result(1);
+      },
+      runHost: async () => { calls.host++; return result(0); }
+    },
+    approvals: { request: async request => {
+      calls.approval++;
+      assert.deepEqual(request.capabilities.map(({ kind, resource }) => ({ kind, resource })), [{ kind: "filesystem.write", resource: blocked }]);
+      return "host-allow-once";
+    } }
+  });
+  const output = await executor.execute("touch ../blocked/file", "trace-call");
+  assert.equal(output.disposition, "host");
+  assert.equal(calls.approval, 1);
+  assert.equal(calls.host, 1);
 });
 
 test("sandbox success is returned without entering escalation", async () => {
