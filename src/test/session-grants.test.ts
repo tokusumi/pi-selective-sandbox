@@ -75,6 +75,12 @@ test("Git admin approval warns about shared metadata and repeated side effects",
   assert.match(message, /A retry starts the entire command again from the beginning/);
   assert.match(message, /\/git-admin\/shared/);
   assert.ok(choices.includes("Allow resource and rerun command once"));
+  await provider.request({
+    kind: "escalation", toolCallId: "remove-call", toolName: "bash", inputDigest: "digest",
+    command: "git worktree remove /git-admin/other", replayWarning: true,
+    capabilities: [write("/git-admin")]
+  });
+  assert.match(message, /parent-directory grant also permits writes to unrelated sibling paths/);
 });
 
 async function fakeTool(kind: "write" | "edit", cwd: string, approvals: ReturnType<typeof createApprovalProvider>, calls: unknown[]) {

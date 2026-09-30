@@ -33,6 +33,10 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   Git configuration, and hooks. Git paths are discovered once at startup; configured
   denies still take precedence, and this does not extend native `write` or
   `edit` permissions.
+- A pure `git worktree remove` targeting a registered worktree outside writable
+  roots offers the target's parent directory for sandbox approval. Removing a
+  directory requires parent write access, and mounting the target directory
+  itself would prevent removal. Parent and child candidates are collapsed.
 - At startup, optional user-local configuration can disable named default
   profiles or add writable roots. Tilde expansion, absolute resolution,
   canonicalization, and deduplication happen once; the resolved caller policy

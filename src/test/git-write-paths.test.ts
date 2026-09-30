@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { gitApprovalPaths, resolveGitWritePaths } from "../git-write-paths.js";
+import { gitApprovalPaths, resolveGitWritePaths, worktreeRemovalParent } from "../git-write-paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +30,12 @@ test("Git approval includes per-worktree and shared metadata for multi-step writ
     assert.deepEqual(gitApprovalPaths(join(paths.commonDir, "refs", "tags"), paths), [paths.commonDir]);
     assert.deepEqual(gitApprovalPaths(join(paths.commonDir, "worktrees", "another"), paths), [paths.commonDir]);
     assert.deepEqual(gitApprovalPaths(root, paths), []);
+    assert.deepEqual(await worktreeRemovalParent(`git worktree remove --force ${worktree}`, worktree), { target: worktree, parent: root });
+    assert.deepEqual(await worktreeRemovalParent(`git -C ${main} worktree remove --force ${worktree}`, root), { target: worktree, parent: root });
+    assert.equal(await worktreeRemovalParent(`git worktree remove --force ${worktree} && echo done`, worktree), undefined);
+    const unregistered = join(root, "unregistered");
+    await mkdir(unregistered);
+    assert.equal(await worktreeRemovalParent(`git worktree remove --force ${unregistered}`, worktree), undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

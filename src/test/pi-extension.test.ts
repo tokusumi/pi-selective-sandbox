@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import selectiveSandboxExtension, { emitExecutorOutput, emitSandboxStatus, redactToolResult } from "../pi-extension.js";
+import selectiveSandboxExtension, { emitExecutorOutput, emitSandboxStatus, minimalWriteRoots, redactToolResult } from "../pi-extension.js";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   const tools: { name: string }[] = [];
@@ -41,6 +41,13 @@ test("sandbox status markers stream as separate transcript lines", () => {
   const chunks = ["fatal: Read-only file system"];
   emitSandboxStatus("<sandbox: approval-required filesystem.write>", chunk => chunks.push(chunk.toString()));
   assert.equal(chunks.join(""), "fatal: Read-only file system\n<sandbox: approval-required filesystem.write>\n");
+});
+
+test("parent approval removes redundant nested mount points", () => {
+  const write = (resource: string) => ({ kind: "filesystem.write" as const, resource });
+  assert.deepEqual(minimalWriteRoots([
+    write("/repo/.git/worktrees/child"), write("/repo"), write("/repo/.git"), write("/other")
+  ]), [write("/repo"), write("/other")]);
 });
 
 test("write fails closed without an interactive approval UI", async () => {

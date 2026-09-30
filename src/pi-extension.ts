@@ -7,7 +7,7 @@ import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-a
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
-import { gitApprovalPaths, resolveGitWritePaths, type GitWritePaths } from "./git-write-paths.js";
+import { gitApprovalPaths, pathContains, resolveGitWritePaths, worktreeRemovalParent, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { runTracedSandbox } from "./strace-runner.js";
@@ -17,7 +17,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentity } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
-import type { ApprovalProvider, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
+import type { ApprovalProvider, Capability, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
 
 type ApprovalUI = {
   hasUI?: boolean;
@@ -31,6 +31,12 @@ async function runCommand(local: BashOperations, command: string, cwd: string, o
     onData: chunk => options.onData(Buffer.from(redact_text(chunk.toString()).redacted))
   });
   return { exitCode: completed.exitCode ?? 1, stdout: "", stderr: "" };
+}
+
+export function minimalWriteRoots(capabilities: readonly Capability[]): Capability[] {
+  const unique = [...new Map(capabilities.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
+  return unique.filter(capability => capability.kind !== "filesystem.write" || !unique.some(other =>
+    other.kind === "filesystem.write" && other.resource !== capability.resource && pathContains(other.resource, capability.resource)));
 }
 
 export function redactToolResult<T extends { content: readonly { type: string; text?: string }[] }>(result: T): T {
@@ -84,8 +90,13 @@ export function createApprovalProvider(
       const sandboxSession = "Allow resource and rerun command (session grant)";
       const sandboxProject = "Allow resource and rerun command (project grant)";
       const gitMetadataWarning = request.capabilities.some(capability =>
-        capability.resource === gitWritePaths?.commonDir || capability.resource === gitWritePaths?.worktreeDir || /(?:^|\/)\.git(?:\/|$)/.test(capability.resource))
+        (gitWritePaths !== undefined && (pathContains(capability.resource, gitWritePaths.commonDir) || pathContains(capability.resource, gitWritePaths.worktreeDir)))
+        || /(?:^|\/)\.git(?:\/|$)/.test(capability.resource))
         ? "\n\nA shared Git directory grant also permits changes to other worktrees' Git metadata, refs, configuration, and hooks."
+        : "";
+      const broadParentWarning = gitWritePaths && request.capabilities.some(capability =>
+        capability.kind === "filesystem.write" && capability.resource !== gitWritePaths.commonDir && pathContains(capability.resource, gitWritePaths.commonDir))
+        ? "\n\nThis parent-directory grant also permits writes to unrelated sibling paths beneath it."
         : "";
       const reusableHost = hostCommand !== undefined;
       const hostProjectEligible = hostProjectStore !== undefined;
@@ -115,7 +126,7 @@ export function createApprovalProvider(
           ? "\n\nSandbox observation (informational for host replay):\n" + requested
           : "\n\nThe violation intersects a configured deny root, so sandbox widening cannot succeed; only exact-command host replay is available.")
           + "\n\nApproving a resource never approves leaving the sandbox. Approving host execution never grants a resource capability."
-          + "\n\nThis command has already run in the sandbox. A retry starts the entire command again from the beginning and may repeat earlier side effects, including file changes or external operations." + gitMetadataWarning + sandboxScope + hostScope
+          + "\n\nThis command has already run in the sandbox. A retry starts the entire command again from the beginning and may repeat earlier side effects, including file changes or external operations." + gitMetadataWarning + broadParentWarning + sandboxScope + hostScope
         : "Permission required before this file mutation:\n\n" + request.command + "\n\nRequested capability:\n" + requested
           + "\n\nNo mutation has occurred yet." + sandboxScope;
       const choice = await context.ui.select(message, choices);
@@ -196,7 +207,18 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                 const boundary = await MutationBoundary.create(commandCwd, writePolicy);
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));
                 if (targets.some(target => target.denied)) return undefined;
-                const canonical = capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
+                let canonical = capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
+                const removal = await worktreeRemovalParent(command, commandCwd);
+                if (removal && targets.some(target => pathContains(removal.target, target.canonical))) {
+                  const removedTarget = await boundary.resolve(removal.target);
+                  if (removedTarget.denied) return undefined;
+                  if (!removedTarget.allowed) {
+                    const parent = await boundary.resolve(removal.parent);
+                    if (parent.denied) return undefined;
+                    canonical = canonical.filter(capability => !pathContains(removal.target, capability.resource));
+                    canonical.push({ kind: "filesystem.write", resource: parent.canonical });
+                  }
+                }
                 // A linked worktree keeps its metadata across worktree and
                 // common Git directories. Bundle related roots into one
                 // explicit approval so Git staging and branch creation can
@@ -209,9 +231,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                   // from removing a worktree directory. Keep only the roots.
                   const other = canonical.filter(capability => gitApprovalPaths(capability.resource, gitWritePaths).length === 0);
                   other.push(...gitPathsToApprove.map(resource => ({ kind: "filesystem.write" as const, resource })));
-                  return [...new Map(other.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
+                  return minimalWriteRoots(other);
                 }
-                return [...new Map(canonical.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
+                return minimalWriteRoots(canonical);
               },
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
               onStatus: marker => emitSandboxStatus(marker, options.onData),
