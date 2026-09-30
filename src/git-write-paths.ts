@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { canonicalPath, type WritePolicy } from "./filesystem-policy.js";
+import type { WritePolicy } from "./filesystem-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,15 +13,12 @@ function contains(root: string, target: string): boolean {
 
 export type GitWritePaths = {
   worktreeDir: string;
-  objectsDir: string;
-  headsDir: string;
-  headsLogsDir: string;
+  commonDir: string;
 };
 
 /**
- * Discovers the Git metadata locations needed for staging and branch updates
- * in a linked worktree. Metadata approval is available only when the worktree
- * itself is writable under the caller's policy.
+ * Discovers Git's per-worktree and shared metadata directories. Metadata
+ * approval is available only when the worktree is writable under policy.
  */
 export async function resolveGitWritePaths(cwd: string, policy: WritePolicy): Promise<GitWritePaths | undefined> {
   let canonicalCwd: string;
@@ -40,27 +37,19 @@ export async function resolveGitWritePaths(cwd: string, policy: WritePolicy): Pr
     });
     const [gitDir, commonDir] = stdout.trim().split(/\r?\n/);
     if (!gitDir || !commonDir || !isAbsolute(gitDir) || !isAbsolute(commonDir)) return undefined;
-    const [worktreeDir, objectsDir, headsDir, headsLogsDir] = await Promise.all([
-      realpath(gitDir),
-      realpath(resolve(commonDir, "objects")),
-      canonicalPath(resolve(commonDir, "refs", "heads")),
-      canonicalPath(resolve(commonDir, "logs", "refs", "heads"))
-    ]);
-    return { worktreeDir, objectsDir, headsDir, headsLogsDir };
+    const [worktreeDir, sharedDir] = await Promise.all([realpath(gitDir), realpath(commonDir)]);
+    return { worktreeDir, commonDir: sharedDir };
   } catch {
     // Non-Git directories and incomplete repositories keep their normal policy.
     return undefined;
   }
 }
 
-/** Groups Git metadata roots that one explicit widening must grant together. */
+/** Offer shared Git metadata, plus a separate worktree admin root if needed. */
 export function gitApprovalPaths(resource: string, paths: GitWritePaths | undefined): string[] {
   if (!paths) return [];
-  if (contains(paths.worktreeDir, resource) || contains(paths.objectsDir, resource)) {
-    return [paths.worktreeDir, paths.objectsDir];
-  }
-  if (contains(paths.headsDir, resource) || contains(paths.headsLogsDir, resource)) {
-    return [paths.worktreeDir, paths.headsDir, paths.headsLogsDir];
+  if (contains(paths.worktreeDir, resource) || contains(paths.commonDir, resource)) {
+    return contains(paths.commonDir, paths.worktreeDir) ? [paths.commonDir] : [paths.worktreeDir, paths.commonDir];
   }
   return [];
 }

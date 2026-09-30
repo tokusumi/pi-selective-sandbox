@@ -7,7 +7,7 @@ import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-a
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
-import { gitApprovalPaths, resolveGitWritePaths } from "./git-write-paths.js";
+import { gitApprovalPaths, resolveGitWritePaths, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { runTracedSandbox } from "./strace-runner.js";
@@ -60,7 +60,8 @@ export function createApprovalProvider(
   context: ApprovalUI,
   grants: SessionGrantStore,
   project?: { projectId: string; grants: ProjectGrantStore; hostGrants?: ProjectHostCommandGrantStore },
-  hostGrants = new SessionHostCommandGrantStore()
+  hostGrants = new SessionHostCommandGrantStore(),
+  gitWritePaths?: GitWritePaths
 ): ApprovalProvider {
   return {
     async request(request) {
@@ -79,13 +80,20 @@ export function createApprovalProvider(
       if (!context.hasUI || !context.ui) return "deny";
 
       const requested = request.capabilities.map(capability => capability.kind + ": " + capability.resource).join("\n");
+      const sandboxOnce = "Allow resource and rerun command once";
+      const sandboxSession = "Allow resource and rerun command (session grant)";
+      const sandboxProject = "Allow resource and rerun command (project grant)";
+      const gitMetadataWarning = request.capabilities.some(capability =>
+        capability.resource === gitWritePaths?.commonDir || capability.resource === gitWritePaths?.worktreeDir || /(?:^|\/)\.git(?:\/|$)/.test(capability.resource))
+        ? "\n\nA shared Git directory grant also permits changes to other worktrees' Git metadata, refs, configuration, and hooks."
+        : "";
       const reusableHost = hostCommand !== undefined;
       const hostProjectEligible = hostProjectStore !== undefined;
       const choices = request.kind === "escalation"
         ? [
-            ...(hasSandboxCandidates ? ["Allow resource in sandbox once"] : []),
-            ...(hasSandboxCandidates && sessionId ? ["Allow resource in sandbox for session"] : []),
-            ...(hasSandboxCandidates && projectEligible ? ["Allow resource in sandbox for project"] : []),
+            ...(hasSandboxCandidates ? [sandboxOnce] : []),
+            ...(hasSandboxCandidates && sessionId ? [sandboxSession] : []),
+            ...(hasSandboxCandidates && projectEligible ? [sandboxProject] : []),
             "Run command on host once",
             ...(reusableHost && sessionId ? ["Run command on host for session"] : []),
             ...(reusableHost && hostProjectEligible ? ["Run command on host for project"] : []),
@@ -107,14 +115,14 @@ export function createApprovalProvider(
           ? "\n\nSandbox observation (informational for host replay):\n" + requested
           : "\n\nThe violation intersects a configured deny root, so sandbox widening cannot succeed; only exact-command host replay is available.")
           + "\n\nApproving a resource never approves leaving the sandbox. Approving host execution never grants a resource capability."
-          + "\n\nThis command already ran once; replay may repeat permitted side effects." + sandboxScope + hostScope
+          + "\n\nThis command has already run in the sandbox. A retry starts the entire command again from the beginning and may repeat earlier side effects, including file changes or external operations." + gitMetadataWarning + sandboxScope + hostScope
         : "Permission required before this file mutation:\n\n" + request.command + "\n\nRequested capability:\n" + requested
           + "\n\nNo mutation has occurred yet." + sandboxScope;
       const choice = await context.ui.select(message, choices);
-      if (hasSandboxCandidates && (choice === "Allow for project" || choice === "Allow resource in sandbox for project") && projectEligible) {
+      if (hasSandboxCandidates && (choice === "Allow for project" || choice === sandboxProject) && projectEligible) {
         try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; } catch { return "deny"; }
       }
-      if (hasSandboxCandidates && (choice === "Allow for session" || choice === "Allow resource in sandbox for session") && sessionId) {
+      if (hasSandboxCandidates && (choice === "Allow for session" || choice === sandboxSession) && sessionId) {
         grants.grant(sessionId, request.capabilities); return "sandbox-allow-session";
       }
       if (request.kind === "escalation" && request.commandIdentity) {
@@ -125,7 +133,7 @@ export function createApprovalProvider(
           hostGrants.grant(sessionId, request.commandIdentity); return "host-allow-session";
         }
       }
-      if (request.kind === "escalation") return choice === "Run command on host once" ? "host-allow-once" : hasSandboxCandidates && choice === "Allow resource in sandbox once" ? "sandbox-allow-once" : "deny";
+      if (request.kind === "escalation") return choice === "Run command on host once" ? "host-allow-once" : hasSandboxCandidates && choice === sandboxOnce ? "sandbox-allow-once" : "deny";
       return choice === "Allow once" ? "sandbox-allow-once" : "deny";
     }
   };
@@ -180,7 +188,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),
-              approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project, hostGrants),
+              approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project, hostGrants, gitWritePaths),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
               getSandboxCapabilities: async () => { const sessionId = (context as unknown as ApprovalUI).sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
@@ -197,7 +205,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                 if (gitPathsToApprove.length > 0) {
                   const metadataTargets = await Promise.all(gitPathsToApprove.map(path => boundary.resolve(path)));
                   if (metadataTargets.some(target => target.denied)) return undefined;
-                  canonical.push(...gitPathsToApprove.map(resource => ({ kind: "filesystem.write" as const, resource })));
+                  // A nested grant becomes a bind mount and can prevent Git
+                  // from removing a worktree directory. Keep only the roots.
+                  const other = canonical.filter(capability => gitApprovalPaths(capability.resource, gitWritePaths).length === 0);
+                  other.push(...gitPathsToApprove.map(resource => ({ kind: "filesystem.write" as const, resource })));
+                  return [...new Map(other.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
                 }
                 return [...new Map(canonical.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
               },
@@ -215,7 +227,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
       return redactToolResult(output);
     }
   });
-  const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants);
+  const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants, gitWritePaths);
   pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
   pi.registerTool(await createBoundaryAwareEditTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
 }

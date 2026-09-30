@@ -9,7 +9,7 @@ import { gitApprovalPaths, resolveGitWritePaths } from "../git-write-paths.js";
 
 const execFileAsync = promisify(execFile);
 
-test("Git approval groups include index/object and branch/ref-log metadata", async () => {
+test("Git approval includes per-worktree and shared metadata for multi-step writes", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-git-write-paths-"));
   const main = join(root, "main");
   const worktree = join(root, "worktree");
@@ -25,9 +25,10 @@ test("Git approval groups include index/object and branch/ref-log metadata", asy
 
     const paths = await resolveGitWritePaths(worktree, { allow: [worktree], deny: [] });
     assert.ok(paths);
-    assert.deepEqual(gitApprovalPaths(paths.worktreeDir, paths), [paths.worktreeDir, paths.objectsDir]);
-    assert.deepEqual(gitApprovalPaths(paths.headsDir, paths), [paths.worktreeDir, paths.headsDir, paths.headsLogsDir]);
-    assert.deepEqual(gitApprovalPaths(join(paths.headsLogsDir, "nested"), paths), [paths.worktreeDir, paths.headsDir, paths.headsLogsDir]);
+    assert.deepEqual(gitApprovalPaths(paths.worktreeDir, paths), [paths.commonDir]);
+    assert.deepEqual(gitApprovalPaths(join(paths.commonDir, "objects"), paths), [paths.commonDir]);
+    assert.deepEqual(gitApprovalPaths(join(paths.commonDir, "refs", "tags"), paths), [paths.commonDir]);
+    assert.deepEqual(gitApprovalPaths(join(paths.commonDir, "worktrees", "another"), paths), [paths.commonDir]);
     assert.deepEqual(gitApprovalPaths(root, paths), []);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -44,4 +45,10 @@ test("Git approval paths are not discovered when the worktree is outside the wri
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("separate Git admin roots are both retained", () => {
+  const paths = { worktreeDir: "/git-admin/worktree", commonDir: "/git-admin/shared" };
+  assert.deepEqual(gitApprovalPaths("/git-admin/worktree/index", paths), [paths.worktreeDir, paths.commonDir]);
+  assert.deepEqual(gitApprovalPaths("/git-admin/shared/refs/heads", paths), [paths.worktreeDir, paths.commonDir]);
 });

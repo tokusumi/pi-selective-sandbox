@@ -26,12 +26,11 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
   `credentials.toml`, and `env` are denied. Deny rules take precedence.
 - For bash, when the startup working directory is writable under that policy,
-  a write violation within Git metadata includes the related metadata roots in
-  the sandbox approval request. A worktree index violation bundles its Git
-  directory and the shared object database; a branch ref violation bundles
-  that worktree's Git directory, shared branch refs, and branch reflogs. This
-  allows operations such as `git add` and `git switch -c` to retry successfully
-  in linked worktrees. Git paths are discovered once at startup; configured
+  a write violation within Git metadata offers the shared Git directory and
+  the worktree's Git directory only if it lies outside the shared one. This covers
+  index, object, ref, reflog, tag, and worktree metadata writes in linked
+  worktrees. The prompt names the shared grant's impact on other worktrees,
+  Git configuration, and hooks. Git paths are discovered once at startup; configured
   denies still take precedence, and this does not extend native `write` or
   `edit` permissions.
 - At startup, optional user-local configuration can disable named default
@@ -92,7 +91,10 @@ For ordinary bash commands:
    offer sandbox-capability approval: deny rules would make the retry
    ineffective. The approval surface may offer exact-command host replay only.
 7. A sandbox-capability response retries in the sandbox with the approved,
-   canonical capability resource.
+   canonical capability resource. If the retry exposes another blocked write,
+   request a separate approval for the newly observed resource and retry with
+   the accumulated grants. Stop when the command finishes, the failure has no
+   new candidate, approval is denied, or the retry limit is reached.
 8. A host-command response replays the exact command on the host.
 
 All attempts may remain visible in the streamed execution transcript. Before
@@ -102,11 +104,15 @@ kind). Approval then streams `<sandbox: approved widen retry>`,
 `<sandbox: approved host-replay>`, or `<sandbox: approval-denied>`. An approved
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
 Only the final selected attempt determines the tool exit code; denial retains
-the initial sandbox exit code. Ordinary failures and sandbox successes have no
+the latest sandbox exit code. Ordinary failures and sandbox successes have no
 status marker.
 
-The command has already been attempted before a replay choice; a replay can
-repeat side effects permitted before the violation. Trusted pure Skill helpers
+The command has already been attempted before a replay choice; each retry can
+repeat side effects permitted before the violation. A command with a write on
+each pass may run several times, with explicit approval for each new resource
+and a limit of 16 sandbox approvals. Resource approval does not classify
+destructive intent: commands such as `git clean -fd` can change files entirely
+inside writable roots without prompting. Trusted pure Skill helpers
 are the explicitly limited exception described in section 13.
 
 ## 6. write/edit flow
