@@ -71,8 +71,11 @@ export function createApprovalProvider(
 ): ApprovalProvider {
   return {
     async request(request) {
-      const projectEligible = request.projectGrantEligible === true && project !== undefined;
+      const broadParentGrant = gitWritePaths !== undefined && request.capabilities.some(capability =>
+        capability.kind === "filesystem.write" && capability.resource !== gitWritePaths.commonDir && pathContains(capability.resource, gitWritePaths.commonDir));
+      const projectEligible = request.projectGrantEligible === true && project !== undefined && !broadParentGrant;
       const sessionId = request.sessionGrantEligible ? context.sessionManager?.getSessionId() : undefined;
+      const sandboxSessionId = broadParentGrant ? undefined : sessionId;
 
       // Host grants contain only an exact canonical command identity. They do not
       // participate in sandbox capability matching or sandbox policy widening.
@@ -82,7 +85,7 @@ export function createApprovalProvider(
       if (sessionId && hostCommand && hostGrants.covers(sessionId, hostCommand)) return "host-allow-session";
       const hasSandboxCandidates = request.capabilities.length > 0;
       if (hasSandboxCandidates && projectEligible && await project.grants.covers(project.projectId, request.capabilities)) return "sandbox-allow-project";
-      if (hasSandboxCandidates && sessionId && grants.covers(sessionId, request.capabilities)) return "sandbox-allow-session";
+      if (hasSandboxCandidates && sandboxSessionId && grants.covers(sandboxSessionId, request.capabilities)) return "sandbox-allow-session";
       if (!context.hasUI || !context.ui) return "deny";
 
       const requested = request.capabilities.map(capability => capability.kind + ": " + capability.resource).join("\n");
@@ -94,8 +97,7 @@ export function createApprovalProvider(
         || /(?:^|\/)\.git(?:\/|$)/.test(capability.resource))
         ? "\n\nA shared Git directory grant also permits changes to other worktrees' Git metadata, refs, configuration, and hooks."
         : "";
-      const broadParentWarning = gitWritePaths && request.capabilities.some(capability =>
-        capability.kind === "filesystem.write" && capability.resource !== gitWritePaths.commonDir && pathContains(capability.resource, gitWritePaths.commonDir))
+      const broadParentWarning = broadParentGrant
         ? "\n\nThis parent-directory grant also permits writes to unrelated sibling paths beneath it."
         : "";
       const reusableHost = hostCommand !== undefined;
@@ -103,20 +105,20 @@ export function createApprovalProvider(
       const choices = request.kind === "escalation"
         ? [
             ...(hasSandboxCandidates ? [sandboxOnce] : []),
-            ...(hasSandboxCandidates && sessionId ? [sandboxSession] : []),
+            ...(hasSandboxCandidates && sandboxSessionId ? [sandboxSession] : []),
             ...(hasSandboxCandidates && projectEligible ? [sandboxProject] : []),
             "Run command on host once",
             ...(reusableHost && sessionId ? ["Run command on host for session"] : []),
             ...(reusableHost && hostProjectEligible ? ["Run command on host for project"] : []),
           ]
         : ["Allow once"];
-      if (request.kind !== "escalation" && sessionId) choices.push("Allow for session");
+      if (request.kind !== "escalation" && sandboxSessionId) choices.push("Allow for session");
       if (request.kind !== "escalation" && projectEligible) choices.push("Allow for project");
       choices.push("Deny");
 
       const sandboxScope = hasSandboxCandidates && projectEligible
         ? "\n\nSandbox project approval remembers exactly:\n" + requested + "\n\nfor local project:\n" + project.projectId + "\nincluding future Pi sessions."
-        : hasSandboxCandidates && sessionId ? "\n\nSandbox session approval remembers exactly the capability/resource above for the current Pi session." : "";
+        : hasSandboxCandidates && sandboxSessionId ? "\n\nSandbox session approval remembers exactly the capability/resource above for the current Pi session." : "";
       const hostScope = reusableHost
         ? "\n\nHost approval target (not a resource permission):\nexact command: " + hostCommand!.shellCommand
           + "\ncanonical cwd: " + hostCommand!.cwd + "\nexecution mode: " + hostCommand!.executionMode
@@ -133,8 +135,8 @@ export function createApprovalProvider(
       if (hasSandboxCandidates && (choice === "Allow for project" || choice === sandboxProject) && projectEligible) {
         try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; } catch { return "deny"; }
       }
-      if (hasSandboxCandidates && (choice === "Allow for session" || choice === sandboxSession) && sessionId) {
-        grants.grant(sessionId, request.capabilities); return "sandbox-allow-session";
+      if (hasSandboxCandidates && (choice === "Allow for session" || choice === sandboxSession) && sandboxSessionId) {
+        grants.grant(sandboxSessionId, request.capabilities); return "sandbox-allow-session";
       }
       if (request.kind === "escalation" && request.commandIdentity) {
         if (choice === "Run command on host for project" && hostProjectEligible) {

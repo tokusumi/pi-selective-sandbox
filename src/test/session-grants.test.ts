@@ -65,22 +65,24 @@ test("session-grant UI describes exact scope and bash never offers it", async ()
 test("Git admin approval warns about shared metadata and repeated side effects", async () => {
   let message = "";
   let choices: string[] = [];
-  const provider = createApprovalProvider({ hasUI: true, ui: { select: async (shown, offered) => { message = shown; choices = offered; return "Deny"; } } }, new SessionGrantStore(), undefined, undefined, { worktreeDir: "/git-admin/shared/worktrees/current", commonDir: "/git-admin/shared" });
+  const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "git-session" }, ui: { select: async (shown, offered) => { message = shown; choices = offered; return "Deny"; } } }, new SessionGrantStore(), undefined, undefined, { worktreeDir: "/git-admin/shared/worktrees/current", commonDir: "/git-admin/shared" });
   await provider.request({
     kind: "escalation", toolCallId: "git-call", toolName: "bash", inputDigest: "digest",
-    command: "git commit -m new && git tag next", replayWarning: true,
+    command: "git commit -m new && git tag next", replayWarning: true, sessionGrantEligible: true,
     capabilities: [write("/git-admin/shared")]
   });
   assert.match(message, /other worktrees' Git metadata, refs, configuration, and hooks/);
   assert.match(message, /A retry starts the entire command again from the beginning/);
   assert.match(message, /\/git-admin\/shared/);
   assert.ok(choices.includes("Allow resource and rerun command once"));
+  assert.ok(choices.includes("Allow resource and rerun command (session grant)"));
   await provider.request({
     kind: "escalation", toolCallId: "remove-call", toolName: "bash", inputDigest: "digest",
-    command: "git worktree remove /git-admin/other", replayWarning: true,
+    command: "git worktree remove /git-admin/other", replayWarning: true, sessionGrantEligible: true,
     capabilities: [write("/git-admin")]
   });
   assert.match(message, /parent-directory grant also permits writes to unrelated sibling paths/);
+  assert.ok(!choices.includes("Allow resource and rerun command (session grant)"));
 });
 
 async function fakeTool(kind: "write" | "edit", cwd: string, approvals: ReturnType<typeof createApprovalProvider>, calls: unknown[]) {
