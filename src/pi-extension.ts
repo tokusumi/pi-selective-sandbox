@@ -7,6 +7,7 @@ import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-a
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
+import { resolveGitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { runTracedSandbox } from "./strace-runner.js";
@@ -149,6 +150,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
         config: { filesystem: { extraWritableRoots: [], disabledDefaultProfiles: [...DEFAULT_WRITE_PROFILES] } },
         env: process.env
       });
+  const gitWritePaths = await resolveGitWritePaths(cwd, writePolicy);
   let runtime: AnthropicSandboxRuntime | undefined;
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
@@ -186,7 +188,16 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                 const boundary = await MutationBoundary.create(commandCwd, writePolicy);
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));
                 if (targets.some(target => target.denied)) return undefined;
-                return capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
+                const canonical = capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
+                // A linked worktree keeps its index separately from the shared
+                // object database. Bundle both resources into one explicit
+                // approval so the approved git add retry can complete.
+                if (gitWritePaths.length > 1 && targets.some(target => target.canonical === gitWritePaths[0])) {
+                  const metadataTargets = await Promise.all(gitWritePaths.map(path => boundary.resolve(path)));
+                  if (metadataTargets.some(target => target.denied)) return undefined;
+                  canonical.push(...gitWritePaths.map(resource => ({ kind: "filesystem.write" as const, resource })));
+                }
+                return [...new Map(canonical.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
               },
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
               onStatus: marker => emitSandboxStatus(marker, options.onData),
