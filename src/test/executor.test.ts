@@ -230,3 +230,78 @@ test("stored sandbox grants suppress matching diagnostic telemetry on normal fai
   assert.equal(f.calls.approvals, 0);
   assert.equal(f.calls.elevated, 0);
 });
+
+test("one failure offers every observed write path together", async () => {
+  const paths = ["/outside/first", "/other/second"];
+  const offered: string[][] = [];
+  const applied: string[][] = [];
+  const executor = new SelectiveSandboxExecutor({
+    runtime: {
+      wrap: async (_command, context) => { applied.push(context.extraCapabilities?.map(capability => capability.resource) ?? []); return "sandbox command"; },
+      getViolationsForCommand: () => paths.map(resource => ({ kind: "filesystem.write", resource }))
+    },
+    runner: { runSandbox: async () => result(applied.length === 1 ? 1 : 0), runHost: async () => { throw new Error("unexpected host run"); } },
+    policy: new CapabilityPolicy([]),
+    approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
+  });
+  const output = await executor.execute("write both paths", "multiple-paths");
+  assert.equal(output.exitCode, 0);
+  assert.deepEqual(offered, [paths]);
+  assert.deepEqual(applied, [[], paths]);
+});
+
+test("a later write violation requests another grant before retrying", async () => {
+  const first = "/outside/first", second = "/outside/second";
+  const offered: string[][] = [];
+  const applied: string[][] = [];
+  const executor = new SelectiveSandboxExecutor({
+    runtime: {
+      wrap: async (_command, context) => { applied.push(context.extraCapabilities?.map(capability => capability.resource) ?? []); return "sandbox command"; },
+      getViolationsForCommand: commandId => [{ kind: "filesystem.write", resource: commandId.endsWith(":1") ? second : first }]
+    },
+    runner: { runSandbox: async () => result(applied.length < 3 ? 1 : 0), runHost: async () => { throw new Error("unexpected host run"); } },
+    policy: new CapabilityPolicy([]),
+    approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
+  });
+  const output = await executor.execute("write first && write second", "sequential-paths");
+  assert.equal(output.exitCode, 0);
+  assert.deepEqual(offered, [[first], [second]]);
+  assert.deepEqual(applied, [[], [first], [first, second]]);
+});
+
+test("denying a later write stops before a third sandbox run", async () => {
+  const offered: string[][] = [];
+  let runs = 0;
+  const executor = new SelectiveSandboxExecutor({
+    runtime: {
+      wrap: async command => command,
+      getViolationsForCommand: commandId => [{ kind: "filesystem.write", resource: commandId.endsWith(":1") ? "/second" : "/first" }]
+    },
+    runner: { runSandbox: async () => { runs++; return result(1); }, runHost: async () => { throw new Error("unexpected host run"); } },
+    policy: new CapabilityPolicy([]),
+    approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return offered.length === 1 ? "sandbox-allow-once" : "deny"; } }
+  });
+  const output = await executor.execute("write first && write second", "deny-later");
+  assert.equal(output.disposition, "denied");
+  assert.equal(runs, 2);
+  assert.deepEqual(offered, [["/first"], ["/second"]]);
+});
+
+test("a repeat violation under the approved capability does not prompt again", async () => {
+  const offered: string[][] = [];
+  let runs = 0;
+  const executor = new SelectiveSandboxExecutor({
+    runtime: {
+      wrap: async command => command,
+      getViolationsForCommand: () => [{ kind: "filesystem.write", resource: "/outside/file" }]
+    },
+    runner: { runSandbox: async () => { runs++; return result(1); }, runHost: async () => { throw new Error("unexpected host run"); } },
+    policy: new CapabilityPolicy([]),
+    canonicalizeCapabilities: async () => [{ kind: "filesystem.write", resource: "/outside" }],
+    approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
+  });
+  const output = await executor.execute("write /outside/file", "repeat-path");
+  assert.equal(output.disposition, "sandbox");
+  assert.equal(runs, 2);
+  assert.deepEqual(offered, [["/outside"]]);
+});

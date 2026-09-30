@@ -228,8 +228,7 @@ export class StraceViolationObserver {
       try {
         const target = attempt.grantScope === "parent" || attempt.grantScope === "nofollow-path"
           ? await boundary.resolveEntry(attempt.path) : await boundary.resolve(attempt.path);
-        if (target.allowed) continue;
-        let resource = target.canonical;
+        let effective = target;
         if (!target.denied && attempt.grantScope !== "path") {
           let needsParent = attempt.grantScope === "parent";
           if (attempt.grantScope === "parent-if-missing") {
@@ -242,8 +241,12 @@ export class StraceViolationObserver {
             try { needsParent = (await lstat(target.canonical)).isSymbolicLink(); }
             catch { continue; }
           }
-          if (needsParent) resource = dirname(target.canonical);
+          if (needsParent) effective = await boundary.resolve(dirname(target.canonical));
         }
+        // Removing an allowed directory still needs write permission on its
+        // parent. Check the actual grant scope after deriving it.
+        if (effective.allowed) continue;
+        const resource = effective.canonical;
         if (seen.has(resource)) continue;
         seen.add(resource);
         violations.push({ kind: "filesystem.write", resource, message: `${attempt.syscall} ${attempt.path} ${attempt.errno}` });

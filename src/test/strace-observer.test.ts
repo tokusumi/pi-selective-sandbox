@@ -172,6 +172,14 @@ test("directory-entry paths do not follow the final symlink", async () => {
   assert.deepEqual((await observer.getViolations()).map(v => v.resource), [blocked]);
 });
 
+test("removing an allowed directory reports its unwritable parent", async () => {
+  const { root, writable, observer } = await fixture();
+  workload(observer, [
+    `102 rmdir("${writable}") = -1 EROFS (Read-only file system)`
+  ]);
+  assert.deepEqual((await observer.getViolations()).map(v => v.resource), [root]);
+});
+
 test("interleaved unfinished and resumed syscalls retain their path and errno", async () => {
   const { blocked, observer } = await fixture();
   observer.ingest([
