@@ -25,6 +25,14 @@ The extension replaces Pi's `bash`, `write`, and `edit` tools.
   directory, `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
   Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
   `credentials.toml`, and `env` are denied. Deny rules take precedence.
+- For bash, when the startup working directory is writable under that policy
+  and a write violation targets its Git directory, the sandbox approval request
+  includes both that worktree's Git directory and the shared Git object's
+  directory. Approving allows commands such as `git add` to retry with the
+  linked worktree index and shared objects writable, even when both live outside
+  the worktree. The Git paths are discovered once at startup; configured denies
+  still take precedence, and this does not extend native `write` or `edit`
+  permissions.
 - At startup, optional user-local configuration can disable named default
   profiles or add writable roots. Tilde expansion, absolute resolution,
   canonicalization, and deduplication happen once; the resolved caller policy

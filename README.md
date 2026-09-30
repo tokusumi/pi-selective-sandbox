@@ -56,6 +56,8 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and GitHub API access for authenticated `gh` use. The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
+When that startup directory is writable and belongs to a Git repository, a blocked write to the worktree's Git directory brings both that directory and the shared object database into the sandbox approval request. Approving the request lets commands such as `git add` retry with the index and objects writable, including in linked worktrees. Configured deny paths still apply, and this access does not change the native `write` or `edit` boundaries.
+
 For `write` and `edit`, a canonical target inside configured writable roots executes normally. A target outside those roots must receive a sandbox-capability approval before any file-content read, directory creation, or mutation. Native write/edit never offer host-command approval.
 
 ### Filesystem configuration
