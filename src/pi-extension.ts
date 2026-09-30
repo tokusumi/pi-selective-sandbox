@@ -7,7 +7,7 @@ import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-a
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
-import { resolveGitWritePaths } from "./git-write-paths.js";
+import { gitApprovalPaths, resolveGitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
 import { runTracedSandbox } from "./strace-runner.js";
@@ -189,13 +189,15 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));
                 if (targets.some(target => target.denied)) return undefined;
                 const canonical = capabilities.map((capability, index) => ({ ...capability, resource: targets[index].canonical }));
-                // A linked worktree keeps its index separately from the shared
-                // object database. Bundle both resources into one explicit
-                // approval so the approved git add retry can complete.
-                if (gitWritePaths.length > 1 && targets.some(target => target.canonical === gitWritePaths[0])) {
-                  const metadataTargets = await Promise.all(gitWritePaths.map(path => boundary.resolve(path)));
+                // A linked worktree keeps its metadata across worktree and
+                // common Git directories. Bundle related roots into one
+                // explicit approval so Git staging and branch creation can
+                // complete on the approved retry.
+                const gitPathsToApprove = [...new Set(targets.flatMap(target => gitApprovalPaths(target.canonical, gitWritePaths)))];
+                if (gitPathsToApprove.length > 0) {
+                  const metadataTargets = await Promise.all(gitPathsToApprove.map(path => boundary.resolve(path)));
                   if (metadataTargets.some(target => target.denied)) return undefined;
-                  canonical.push(...gitWritePaths.map(resource => ({ kind: "filesystem.write" as const, resource })));
+                  canonical.push(...gitPathsToApprove.map(resource => ({ kind: "filesystem.write" as const, resource })));
                 }
                 return [...new Map(canonical.map(capability => [`${capability.kind}\0${capability.resource}`, capability])).values()];
               },
