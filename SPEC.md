@@ -211,26 +211,6 @@ repository does not inherit its project grants.
 | Other Linux | Isolated | Isolated | Isolated | Yes |
 | Ubuntu | Isolated | Isolated | Unrestricted | Yes |
 
-On macOS, the runtime's unvalidated system-log stream is disabled, keeping its
-chunk attribution and sanitized paths out of the proxy telemetry store. Seatbelt
-denials are classified by their operation name, not by words in a process name
-or resource path. Only filesystem-read, filesystem-write, and network operations
-are supported capabilities; sysctl and Mach lookup noise does not become a
-resource candidate. After every failed command, the adapter queries `log show`
-with a one-second timeout for kernel Sandbox events since the attempt started,
-matching the exact attribution tag extracted from its wrapped profile. Each
-attempt gets a fresh short attribution key, independent of the caller's tool
-ID, avoiding the runtime's 100-character truncation and stale-event reuse. Only
-that validated snapshot supplies Seatbelt capabilities and raw resources.
-The runtime's independent proxy-produced `deny network-outbound` and
-`deny http-request` events are retained separately as network telemetry.
-Missing or ambiguous attribution fails closed before command execution.
-Non-kernel senders, other tags, and unsupported operations are excluded from the
-snapshot. Malformed or unavailable log-query output fails explicitly without
-implicit host execution. Without a supported snapshot or proxy denial, the
-ordinary failure returns without approval; stderr alone never authorizes
-escalation.
-
 Ubuntu is detected from `ID=ubuntu` in `/etc/os-release`, regardless of version,
 and uses `network.allowAllUnixSockets: true`. The tested Ubuntu 24.04 host's
 AppArmor policy allows the outer Bubblewrap sandbox while blocking the nested
