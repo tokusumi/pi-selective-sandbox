@@ -14,7 +14,9 @@ const x64Calls = [
   "open", "creat", "unlink", "rmdir", "rename", "link", "symlink",
   "mkdir", "mknod", "truncate", "chmod", "chown", "lchown", "utime", "utimes"
 ] as const;
-const observedCalls: readonly string[] = [...commonCalls, ...(process.arch === "x64" ? x64Calls : [])];
+// Capture native syscalls, but parse known traces independently of the host CPU.
+const supportedCalls: readonly string[] = [...commonCalls, ...x64Calls];
+const observedCalls: readonly string[] = process.arch === "x64" ? supportedCalls : commonCalls;
 export const STRACE_BINARY = "/usr/bin/strace";
 
 export const STRACE_ARGS = [
@@ -206,7 +208,7 @@ export class StraceViolationObserver {
       if (next) this.cwdByPid.set(pid, next);
       return;
     }
-    if (!isWorkloadProcess || !observedCalls.includes(syscall)) return;
+    if (!isWorkloadProcess || !supportedCalls.includes(syscall)) return;
     if (!/^-1 EROFS\b/.test(result)) return;
     for (const { path, grantScope } of writeTargets(syscall, argsOf(input), this.cwdByPid.get(pid))) {
       if (path === "/newroot" || path.startsWith("/newroot/")) continue;

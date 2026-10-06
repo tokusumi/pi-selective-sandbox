@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SelectiveSandboxExecutor } from "../executor.js";
@@ -34,7 +34,7 @@ test("ordinary sandbox failure never requests approval", async () => {
 });
 
 test("trace observation reaches the existing host replay approval path", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-executor-trace-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-executor-trace-")));
   const writable = join(root, "writable"), blocked = join(root, "blocked");
   await Promise.all([mkdir(writable), mkdir(blocked)]);
   const observer = new StraceViolationObserver(writable, { allow: [writable], deny: [] });

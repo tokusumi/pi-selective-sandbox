@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,7 @@ import { StraceViolationObserver } from "../strace-observer.js";
 import { runTracedSandbox } from "../strace-runner.js";
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "pi-strace-test-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-strace-test-")));
   const writable = join(root, "writable");
   const blocked = join(root, "blocked");
   await Promise.all([mkdir(writable), mkdir(blocked)]);

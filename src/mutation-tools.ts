@@ -11,6 +11,7 @@ type NativeTool<T extends MutationInput> = {
 
 export type MutationToolOptions = {
   cwd: string;
+  isEnabled?: () => boolean;
   writePolicy?: WritePolicy;
   writableRoots?: readonly string[] | ((cwd: string, context: unknown) => readonly string[]);
   approvals: ApprovalProvider | ((context: unknown) => ApprovalProvider);
@@ -31,6 +32,7 @@ export async function boundaryAwareTool<T extends MutationInput>(
   return {
     ...native,
     async execute(id, params, signal, onUpdate, context?: unknown) {
+      if (options.isEnabled?.() === false) return native.execute(id, params, signal, onUpdate, context);
       const effectiveCwd = contextCwd(context, options.cwd);
       const writableRoots = typeof options.writableRoots === "function"
         ? options.writableRoots(effectiveCwd, context)
