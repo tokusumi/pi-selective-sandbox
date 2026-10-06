@@ -17,6 +17,15 @@ this specification governs the intended behavior.
 
 The extension replaces Pi's `bash`, `write`, and `edit` tools.
 
+Sandbox enforcement starts enabled. The user command `/selective-sandbox off`
+explicitly disables enforcement for all three tools until extensions are reloaded
+with Pi's `/reload` command, Pi restarts, or the user runs `/selective-sandbox on`.
+While disabled, bash executes directly on the host with output
+redaction, and native write/edit skip boundary checks and approvals. This mode
+is not a grant and is not persisted. Missing or unsupported arguments display
+usage without changing the mode. The sandbox-first and fail-closed contracts
+below apply while enforcement is enabled.
+
 - `bash` is a subprocess execution surface. Normal commands are wrapped by the
   OS sandbox runtime before the command runner starts them.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,

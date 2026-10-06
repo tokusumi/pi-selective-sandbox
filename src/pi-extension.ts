@@ -155,6 +155,21 @@ export function createApprovalProvider(
 /** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
 export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
   const cwd = process.cwd();
+  let enabled = true;
+  pi.registerCommand("selective-sandbox", {
+    description: "Enable or disable sandbox enforcement: /selective-sandbox on|off",
+    async handler(args, context) {
+      const mode = args.trim();
+      if (mode !== "on" && mode !== "off") {
+        context.ui.notify("Usage: /selective-sandbox on|off", "info");
+        return;
+      }
+      enabled = mode === "on";
+      context.ui.notify(enabled
+        ? "Selective sandbox enabled for bash, write, and edit."
+        : "Selective sandbox disabled for bash, write, and edit. Use /selective-sandbox on to enable it again.", enabled ? "info" : "warning");
+    }
+  });
   const grants = new SessionGrantStore();
   const hostGrants = new SessionHostCommandGrantStore();
   const projectId = await resolveProjectIdentity(cwd);
@@ -180,12 +195,15 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     try { await initialization; } catch (error) { runtime = undefined; sandboxUnavailableMessage = sandboxInitializationError(error); }
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
-  const localBash = createBashTool(cwd);
+  const localOperations = createLocalBashOperations();
+  const localBash = createBashTool(cwd, {
+    operations: { exec: (command, commandCwd, options) => runCommand(localOperations, command, commandCwd, options) }
+  });
   pi.registerTool({
     ...localBash,
     async execute(id, params, signal, onUpdate, context) {
+      if (!enabled) return redactToolResult(await localBash.execute(id, params, signal, onUpdate));
       await ensureRuntime();
-      const localOperations = createLocalBashOperations();
       const sandboxedBash = createBashTool(cwd, {
         operations: {
           async exec(command, commandCwd, options) {
@@ -252,8 +270,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     }
   });
   const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants, gitWritePaths);
-  pi.registerTool(await createBoundaryAwareWriteTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
-  pi.registerTool(await createBoundaryAwareEditTool({ cwd, writePolicy, approvals: approvalProvider }) as never);
+  const mutationOptions = { cwd, writePolicy, approvals: approvalProvider, isEnabled: () => enabled };
+  pi.registerTool(await createBoundaryAwareWriteTool(mutationOptions) as never);
+  pi.registerTool(await createBoundaryAwareEditTool(mutationOptions) as never);
 }
 
 export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {

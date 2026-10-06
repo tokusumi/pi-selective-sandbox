@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +10,7 @@ import { gitApprovalPaths, resolveGitWritePaths, worktreeRemovalParent } from ".
 const execFileAsync = promisify(execFile);
 
 test("Git approval includes per-worktree and shared metadata for multi-step writes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-git-write-paths-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-git-write-paths-")));
   const main = join(root, "main");
   const worktree = join(root, "worktree");
   await mkdir(main);

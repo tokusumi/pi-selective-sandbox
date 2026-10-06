@@ -66,6 +66,8 @@ Approval is tied to filesystem access, not whether a Git command is destructive.
 
 For `write` and `edit`, a canonical target inside configured writable roots executes normally. A target outside those roots must receive a sandbox-capability approval before any file-content read, directory creation, or mutation. Native write/edit never offer host-command approval.
 
+Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash`, `write`, and `edit`. Subsequent bash commands run directly on the host, and native file mutations skip boundary approvals. Bash output redaction remains active. Run `/selective-sandbox on` to enable enforcement again. The setting stays in memory and is not saved to configuration or grants; Pi's `/reload` command (which reloads extensions) or restarting Pi also restores enforcement. Missing or unsupported arguments display usage and leave enforcement unchanged.
+
 ### Filesystem configuration
 
 Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. A missing file uses defaults. An existing malformed file, invalid field, or unknown profile name emits a diagnostic and installs a deny-by-default write policy while still replacing all three tools. Extra roots remain inside the sandbox and do not authorize host replay.

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,7 +9,7 @@ import { MutationBoundary } from "../filesystem-boundary.js";
 import { buildSandboxRuntimeConfig } from "../runtime-adapter.js";
 
 async function fixture() {
-  const base = await mkdtemp(join(tmpdir(), "pi-policy-"));
+  const base = await realpath(await mkdtemp(join(tmpdir(), "pi-policy-")));
   const cwd = join(base, "project");
   const home = join(base, "home");
   await Promise.all([mkdir(cwd), mkdir(home)]);
@@ -20,7 +20,7 @@ test("default Cargo profile uses ~/.cargo and protects sensitive entries", async
   const { cwd, home } = await fixture();
   const policy = await resolveWritePolicy({ cwd, home, env: {}, config: parseConfig({}) });
   const cargo = join(home, ".cargo");
-  assert.deepEqual(policy.allow, [cwd, "/tmp", cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
+  assert.deepEqual(policy.allow, [cwd, await realpath("/tmp"), cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
   const boundary = await MutationBoundary.create(cwd, policy);
   assert.equal((await boundary.resolve(join(cargo, "registry", "index"))).allowed, true);
   assert.equal((await boundary.resolve(join(cargo, ".package-cache"))).allowed, true);
@@ -46,7 +46,7 @@ test("CARGO_HOME, extra roots, tilde expansion, disabling, and runtime equality"
 test("cargo profile can be disabled", async () => {
   const { cwd, home } = await fixture();
   const policy = await resolveWritePolicy({ cwd, home, env: {}, config: parseConfig({ filesystem: { disabledDefaultProfiles: ["cargo-cache"] } }) });
-  assert.deepEqual(policy, { allow: [cwd, "/tmp", join(home, ".npm", "_logs"), join(home, ".claude", "debug")], deny: [] });
+  assert.deepEqual(policy, { allow: [cwd, await realpath("/tmp"), join(home, ".npm", "_logs"), join(home, ".claude", "debug")], deny: [] });
 });
 
 test("resolved policy canonicalizes symlink roots", async () => {
