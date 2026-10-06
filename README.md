@@ -93,6 +93,15 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 | Other Linux | Isolated | Isolated | Isolated |
 | Ubuntu | Isolated | Isolated | Unrestricted |
 
+On macOS, the extension leaves the runtime's unvalidated log stream disabled.
+After a failed command, a bounded `log show` query (at most one second) retrieves
+exact-tagged kernel denials. Only validated snapshots supply Seatbelt violations
+and raw filesystem paths; streamed paths never become grants. SDK proxy-network
+notifications are retained separately. Sysctl and Mach-service noise do not
+become approval candidates. Without a supported denial, no approval is offered;
+stderr alone is not proof of a sandbox violation. An unavailable log query fails
+explicitly without host fallback.
+
 The extension detects Ubuntu from `ID=ubuntu` in `/etc/os-release` and sets
 `network.allowAllUnixSockets: true` for every Ubuntu release. Unix-socket
 isolation is not provided on this execution path. Bubblewrap still enforces
