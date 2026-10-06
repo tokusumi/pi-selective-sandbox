@@ -1,12 +1,10 @@
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { WritePolicy } from "./filesystem-policy.js";
 import { StraceViolationObserver, STRACE_ARGS, STRACE_BINARY } from "./strace-observer.js";
 import type { SandboxRuntime, SandboxViolation } from "./types.js";
-import { macOSCommandObservation, readMacOSViolationLines, type MacOSCommandObservation } from "./macos-observer.js";
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
@@ -58,35 +56,20 @@ export function sandboxInitializationError(error: unknown): string {
 }
 
 function resourceFromLine(line: string): string {
-  const filesystem = line.match(/\bdeny(?:\(\d+\))?\s+file-(?:read|write)(?:-[\w-]+)?\s+(.+)$/)?.[1];
-  if (filesystem) {
-    const unquoted = filesystem.replace(/^(['"])(.*)\1$/, "$2");
-    if (unquoted.startsWith("/") || unquoted.startsWith("~/")) return unquoted;
-  }
   const quoted = line.match(/['"]((?:\/|~\/)[^'"\s]+)['"]/);
   const path = quoted ?? line.match(/((?:\/|~\/)[^\s,;]+)/);
   return path?.[1] ?? "unknown";
 }
 
-function isProxyNetworkViolation(line: string): boolean {
-  // Proxy producers use this unprefixed format; Seatbelt lines include a PID.
-  return /^deny (?:network-outbound|http-request)\s/.test(line);
-}
-
-export function violationFromLine(line: string): SandboxViolation {
-  // Seatbelt emits `<process>(pid) deny(1) <operation> <resource>`;
-  // Linux observers and proxies emit `deny <operation> <resource>`.
-  // Process names and paths may themselves contain "read" or "network".
-  const operation = line.match(/\bdeny(?:\(\d+\))?\s+([\w-]+)/i)?.[1] ?? "";
-  if (/^(?:network(?:-|$)|http-request$|connect$|outbound$)/i.test(operation)) return { kind: "network", resource: resourceFromLine(line), message: line };
-  if (/^file-read(?:-|$)/i.test(operation)) return { kind: "filesystem.read", resource: resourceFromLine(line), message: line };
+function violationFromLine(line: string): SandboxViolation {
+  if (/network|connect|outbound/i.test(line)) return { kind: "network", resource: resourceFromLine(line), message: line };
+  if (/read|file-read/i.test(line)) return { kind: "filesystem.read", resource: resourceFromLine(line), message: line };
   return { kind: "filesystem.write", resource: resourceFromLine(line), message: line };
 }
 
 /** Concrete adapter for @anthropic-ai/sandbox-runtime's per-command telemetry. */
 export class AnthropicSandboxRuntime implements SandboxRuntime {
   private readonly strace = new Map<string, StraceViolationObserver>();
-  private readonly macOS = new Map<string, MacOSCommandObservation & { attributionId: string }>();
   private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean) {}
 
   static async initialize(settings: SandboxSettings): Promise<AnthropicSandboxRuntime> {
@@ -95,23 +78,15 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       try { await promisify(execFile)(STRACE_BINARY, [...STRACE_ARGS, "/usr/bin/true"], { timeout: 5000 }); }
       catch (cause) { throw new Error("Ubuntu filesystem observation requires working strace.", { cause }); }
     }
-    // The stream has no sender provenance and can contaminate proxy telemetry.
-    // macOS uses kernel snapshots; proxy denials are recorded independently.
-    // Linux's startup-policy observer cannot account for per-command grants.
-    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, false);
+    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu));
     return new AnthropicSandboxRuntime(settings, ubuntu);
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
     const policy = this.settings.writePolicy;
-    const since = Date.now();
-    // SDK tags truncate keys at 100 characters. A fresh short key also prevents
-    // stale log events when callers reuse a tool-call ID across attempts.
-    const attributionId = process.platform === "darwin" ? randomUUID() : context.commandId;
-    const wrapped = await SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, { ...context, commandId: attributionId });
+    const wrapped = await SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, context);
     if (this.useStrace) this.strace.set(context.commandId, new StraceViolationObserver(context.cwd ?? this.settings.cwd, { allow: [...policy.allow, ...extraWrites], deny: policy.deny }));
-    if (process.platform === "darwin") this.macOS.set(context.commandId, { ...macOSCommandObservation(wrapped, attributionId, since), attributionId });
     return wrapped;
   }
 
@@ -120,24 +95,13 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     return observer ? chunk => observer.ingest(chunk) : undefined;
   }
 
-  forgetCommand(commandId: string): void { this.strace.delete(commandId); this.macOS.delete(commandId); }
+  forgetCommand(commandId: string): void { this.strace.delete(commandId); }
 
   async getViolationsForCommand(commandId: string): Promise<readonly SandboxViolation[]> {
     const observer = this.strace.get(commandId);
     this.strace.delete(commandId);
-    const store = SandboxManager.getSandboxViolationStore();
-    if (process.platform === "darwin") {
-      const observation = this.macOS.get(commandId);
-      if (!observation) throw new Error("macOS sandbox command attribution is unavailable.");
-      // Always validate the snapshot: stream chunks can misattribute another
-      // command's denial and the upstream store strips '<'/'>' from paths.
-      const kernel = (await readMacOSViolationLines(observation)).map(violationFromLine);
-      // Proxy events originate in-process and do not have kernel counterparts.
-      const proxy = store.getViolationsForCommand(observation.attributionId).filter(event => isProxyNetworkViolation(event.line)).map(event =>
-        ({ ...violationFromLine(event.line), kind: "network" as const }));
-      return [...kernel, ...proxy];
-    }
-    const upstream = store.getViolationsForCommand(commandId).map(event => violationFromLine(event.line));
+    const upstream = SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
+      .map(event => violationFromLine(event.line));
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
   }
 
