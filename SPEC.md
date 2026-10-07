@@ -200,14 +200,22 @@ violation.
 
 Project identity is resolved once at extension startup:
 
-1. canonical Git worktree root, when Git can provide one;
+1. canonical Git base directory, when Git can provide one (the first entry from
+   `git worktree list --porcelain -z`); normally this is the main worktree
+   directory, shared by linked worktrees. For bare repositories and
+   `--separate-git-dir` layouts, Git reports the repository metadata directory
+   as the base instead;
 2. otherwise, canonical startup cwd.
 
 If neither path can be canonicalized, project persistence is unavailable.
 Project identity is distinct from the extension startup working directory used as
 the default writable root. Changing directories later does not change the
-identity. Moving or cloning a
-repository does not inherit its project grants.
+identity. Project grants are shared across the main and linked worktrees, but
+capability resources and host command cwd remain exact canonical paths; sharing
+project identity does not make a host command approved in one cwd eligible in
+another. Moving or cloning a repository does not inherit its project grants.
+Previously stored grants keyed to an individual linked worktree are not migrated
+to the base identity; approve them again for the shared project if needed.
 
 ## 11. Linux telemetry semantics
 
