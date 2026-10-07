@@ -77,7 +77,7 @@ test("write denials offer resource widening for ordinary and subagent tool IDs",
   for (const id of ["ordinary-call", "subagent:reviewer:call-1"]) {
     let attempts = 0, prompts = 0, hostCalls = 0;
     const wrap = t.mock.method(runtime, "wrap", async (command: string, context: Parameters<typeof runtime.wrap>[1]) => {
-      if (attempts > 0) assert.deepEqual(context.extraCapabilities, [{ kind: "filesystem.write", resource, message: `read-helper(123) deny(1) file-write-create ${resource}` }]);
+      if (attempts > 0) assert.deepEqual(context.extraCapabilities, [{ kind: "filesystem.write", resource }]);
       return command;
     });
     const executor = new SelectiveSandboxExecutor({
@@ -92,14 +92,17 @@ test("write denials offer resource widening for ordinary and subagent tool IDs",
       },
       approvals: createApprovalProvider({ hasUI: true, ui: { select: async (_message, choices) => {
         prompts++;
-        assert.ok(choices.includes("Allow resource and rerun command once"));
-        assert.ok(choices.includes("Run command on host once"));
-        return "Allow resource and rerun command once";
+        if (choices.includes(resource)) return resource;
+        if (choices.includes("Once")) return "Once";
+        assert.ok(choices.includes("Allow and retry"));
+        assert.ok(choices.includes("Run outside sandbox…"));
+        assert.ok(!choices.includes("Run command on host once"));
+        return "Allow and retry";
       } } }, new SessionGrantStore())
     });
     assert.equal((await executor.execute("touch file", id)).exitCode, 0);
     assert.equal(attempts, 2);
-    assert.equal(prompts, 1);
+    assert.equal(prompts, 3);
     assert.equal(hostCalls, 0);
     wrap.mock.restore();
   }
@@ -243,4 +246,15 @@ test("unavailable strace is reported without offering host execution", () => {
   const message = sandboxInitializationError(new Error("Ubuntu filesystem observation requires working strace."));
   assert.match(message, /strace could not trace commands/);
   assert.match(message, /Host execution was not attempted/);
+});
+
+
+test("a selected root grant keeps the caller's deny rules in the sandbox retry", async t => {
+  await macOSFixture(t);
+  const runtime = await AnthropicSandboxRuntime.initialize({ cwd: "/worktree", writePolicy: { allow: ["/worktree"], deny: ["/protected/secret"] } });
+  const wrap = t.mock.method(SandboxManager, "wrapWithSandbox", async () => "wrapped");
+  await runtime.wrap("touch output", { commandId: "root-retry", commandText: "touch output", extraCapabilities: [{ kind: "filesystem.write", resource: "/" }] });
+  const overrides = wrap.mock.calls[0].arguments[2];
+  assert.deepEqual(overrides?.filesystem?.allowWrite, ["/worktree", "/"]);
+  assert.deepEqual(overrides?.filesystem?.denyWrite, ["/protected/secret"]);
 });

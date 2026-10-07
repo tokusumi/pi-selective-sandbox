@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { validateWideningSelection } from "./resource-selection.js";
+import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority } from "./types.js";
@@ -31,8 +33,10 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
       const wideningBlocked = prepared === undefined;
-      const caps = wideningBlocked ? [] : prepared.filter(candidate => !granted.some(capability => capability.kind === candidate.kind && capability.resource === candidate.resource));
-      const uncovered = observed.filter(violation => !granted.some(capability => capability.kind === violation.kind && capability.resource === violation.resource));
+      const covered = (candidate: Capability) => granted.some(capability => capability.kind === candidate.kind
+        && (capability.kind === "filesystem.write" ? pathContains(capability.resource, candidate.resource) : capability.resource === candidate.resource));
+      const caps = wideningBlocked ? [] : prepared.filter(candidate => !covered(candidate));
+      const uncovered = observed.filter(violation => !covered(violation));
       // A write already covered by the current authority cannot make another
       // retry useful. Other violation kinds can still offer host replay.
       if (!wideningBlocked && caps.length === 0 && uncovered.every(violation => violation.kind === "filesystem.write")) return this.finish(attempt, "sandbox", observed);
@@ -41,16 +45,20 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (approvalsUsed >= MAX_SANDBOX_APPROVALS) return this.finish(attempt, "sandbox", violations);
       const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
       this.status(`approval-required ${violations[0].kind}`);
-      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
-      if (response === "host-allow-once" || response === "host-allow-session" || response === "host-allow-project") {
+      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: violations, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
+      const decision = typeof response === "string" ? response : response.decision;
+      if (decision === "host-allow-once" || decision === "host-allow-session" || decision === "host-allow-project") {
         this.status("approved host-replay");
         const replay = await runner.runHost(command);
         this.status(`replay exit=${replay.exitCode}`);
         return this.finish(replay, "host", violations);
       }
-      if (response === "deny" || caps.length === 0) { this.status("approval-denied"); return this.finish(attempt, "denied", violations); }
+      const selected = typeof response === "string" ? caps : response.capabilities;
+      if (decision === "deny" || caps.length === 0 || (typeof response !== "string" && !await validateWideningSelection(caps, selected))) {
+        this.status("approval-denied"); return this.finish(attempt, "denied", violations);
+      }
       this.status("approved widen retry");
-      granted.push(...caps);
+      granted.push(...selected);
       priorViolations = violations;
       approvalsUsed++;
       commandId = `${toolCallId}:widened:${approvalsUsed}`;

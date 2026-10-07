@@ -42,9 +42,16 @@ export type SandboxApprovalRequest = {
   projectGrantEligible?: boolean;
 };
 
-export type EscalationApprovalRequest = Omit<SandboxApprovalRequest, "kind"> & { kind: "escalation"; commandIdentity?: CommandIdentity };
+export type EscalationApprovalRequest = Omit<SandboxApprovalRequest, "kind"> & {
+  kind: "escalation";
+  commandIdentity?: CommandIdentity;
+  /** Raw observed targets, distinct from prepared Git/directory-entry scopes. */
+  observedCapabilities?: readonly Capability[];
+};
 export type ApprovalRequest = SandboxApprovalRequest | EscalationApprovalRequest;
-export type ApprovalResponse = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project" | "host-allow-once" | "host-allow-session" | "host-allow-project" | "deny";
+export type SandboxApprovalDecision = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project";
+export type SandboxWideningApproval = { decision: SandboxApprovalDecision; capabilities: readonly Capability[] };
+export type ApprovalResponse = SandboxApprovalDecision | "host-allow-once" | "host-allow-session" | "host-allow-project" | "deny" | SandboxWideningApproval;
 export type ApprovalProvider = { request(request: ApprovalRequest): Promise<ApprovalResponse> };
 
 export type EscalationDecision = "deny" | "auto-escalate" | "ask";
