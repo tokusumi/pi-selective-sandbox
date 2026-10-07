@@ -15,7 +15,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "postinstall": "node scripts/apply-sandbox-runtime-patch.mjs"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.85.1",
@@ -27,7 +28,7 @@
     "node": ">=24.15.0"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "^0.0.76",
+    "@anthropic-ai/sandbox-runtime": "0.0.76",
     "@spences10/pi-redact": "^0.0.15",
     "@spences10/pi-skills": "^0.0.36"
   },

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
-import { AnthropicSandboxRuntime, sandboxInitializationError } from "./runtime-adapter.js";
+import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
@@ -156,6 +156,13 @@ export function createApprovalProvider(
 export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
   const cwd = process.cwd();
   let enabled = true;
+  let monitorDisabled = false;
+  const monitorDisabledMessage = "Selective sandbox is disabled for bash, write, and edit because macOS SDK log monitoring is disabled (enableLogMonitor=false). Bash runs on the host; native mutation approvals are bypassed. Enable SDK log monitoring and reload to restore enforcement.";
+  const warnMonitorDisabled = (context?: unknown) => {
+    const ctx = context as { hasUI?: boolean; ui?: { notify(message: string, level: "warning"): void } } | undefined;
+    if (ctx?.hasUI && ctx.ui) ctx.ui.notify(monitorDisabledMessage, "warning");
+    else console.warn("WARNING: " + monitorDisabledMessage);
+  };
   pi.registerCommand("selective-sandbox", {
     description: "Enable or disable sandbox enforcement: /selective-sandbox on|off",
     async handler(args, context) {
@@ -164,7 +171,12 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
         context.ui.notify("Usage: /selective-sandbox on|off", "info");
         return;
       }
+      if (mode === "on" && monitorDisabled) {
+        warnMonitorDisabled(context);
+        return;
+      }
       enabled = mode === "on";
+      if (enabled && !await isEnabled(context)) return;
       context.ui.notify(enabled
         ? "Selective sandbox enabled for bash, write, and edit."
         : "Selective sandbox disabled for bash, write, and edit. Use /selective-sandbox on to enable it again.", enabled ? "info" : "warning");
@@ -191,8 +203,24 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy }).then(value => { runtime = value; });
-    try { await initialization; } catch (error) { runtime = undefined; sandboxUnavailableMessage = sandboxInitializationError(error); }
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy }).then(value => {
+      runtime = value;
+      monitorDisabled = process.platform === "darwin" && value.logMonitorEnabled === false;
+    });
+    try { await initialization; } catch (error) {
+      runtime = undefined;
+      sandboxUnavailableMessage = sandboxInitializationError(error);
+      if (process.platform === "darwin" && error instanceof SandboxInitializationFailure) monitorDisabled = error.logMonitorEnabled === false;
+    }
+  };
+  const isEnabled = async (context?: unknown) => {
+    if (!enabled) return false;
+    if (process.platform === "darwin") await ensureRuntime();
+    if (monitorDisabled && enabled) {
+      enabled = false;
+      warnMonitorDisabled(context);
+    }
+    return enabled;
   };
   pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
   const localOperations = createLocalBashOperations();
@@ -202,7 +230,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   pi.registerTool({
     ...localBash,
     async execute(id, params, signal, onUpdate, context) {
-      if (!enabled) return redactToolResult(await localBash.execute(id, params, signal, onUpdate));
+      if (!await isEnabled(context)) return redactToolResult(await localBash.execute(id, params, signal, onUpdate));
       await ensureRuntime();
       const sandboxedBash = createBashTool(cwd, {
         operations: {
@@ -270,7 +298,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     }
   });
   const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants, gitWritePaths);
-  const mutationOptions = { cwd, writePolicy, approvals: approvalProvider, isEnabled: () => enabled };
+  const mutationOptions = { cwd, writePolicy, approvals: approvalProvider, isEnabled };
   pi.registerTool(await createBoundaryAwareWriteTool(mutationOptions) as never);
   pi.registerTool(await createBoundaryAwareEditTool(mutationOptions) as never);
 }
