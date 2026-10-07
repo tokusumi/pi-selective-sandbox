@@ -94,9 +94,13 @@ Every supported authority can be approved with one of these scopes:
 - `project`: retained in user-local persistent state for the current project
   identity and available to future Pi sessions in that project.
 
-Grants are exact. A grant does not imply a parent directory, subtree, different
-resource, different capability, different project, command prefix, tool name,
-or executable-name match.
+Grant identities are exact. A grant does not implicitly substitute a parent
+directory, different resource, different capability, different project, command
+prefix, tool name, or executable-name match. The user may explicitly choose an
+ancestor directory for bash widening; that directory is the granted resource.
+Inside the sandbox, a directory write grant permits writes beneath it, subject
+to existing deny rules. Native write/edit approvals continue to match exact
+canonical targets rather than inheriting ancestor grants.
 
 ## 5. Bash execution flow
 
@@ -118,6 +122,44 @@ For ordinary bash commands:
    the accumulated grants. Stop when the command finishes, the failure has no
    new candidate, approval is denied, or the retry limit is reached.
 8. A host-command response replays the exact command on the host.
+
+### Resource approval interaction
+
+For supported write candidates, interactive TUI approval separates the observed
+blocked targets from the initial capability scopes (including prepared Git and
+directory-entry scopes), the selected write scopes, duration, and command.
+The initial selection is each prepared scope and `Once`. The user can choose
+that scope or any canonical ancestor up to `/`; there is no HOME-specific limit
+and no free-form path input. Each scope gets its own selection when several are
+required. The full selected path remains visible even when a candidate row is
+truncated. Directory choices explain that descendants are writable, and `/`
+requires a visible whole-filesystem warning. Existing configured and SDK deny
+rules remain in force. Parents of shared Git metadata retain once-only scope.
+
+Only final `Allow and retry` confirmation grants access. Eligible durations are
+`Once`, `This session`, and `This project`; selecting a scope can remove reusable
+durations. Tab/Shift+Tab change fields, arrows select, Enter continues or
+confirms, and Escape denies. Cancellation or an aborted tool must not create a
+new approval. RPC uses built-in sequential scope, duration, and confirmation
+selectors; print/JSON modes must not acquire authority by lack of UI.
+
+Before persistence and retry, selected scopes must be write capabilities from
+the initial scopes' ancestor chains, cover every required scope, and retain
+their canonical identities. Unrelated paths, omitted scopes, changed symlink
+identities, and ineligible durations deny the request. Approved overlapping
+write scopes can be collapsed to the expressly selected outer ancestor. Only
+those selected scopes are stored and applied to the sandbox retry. A repeated
+write denial already beneath an applied grant does not request the same
+ineffective widening again. Storage identity matching remains exact.
+
+Host replay is a separate `Run outside sandbox…` action with its own duration
+and final exact-command confirmation, displaying command, canonical cwd and
+execution mode when available. It never turns a resource choice into host
+authority. Unsupported violations and configured-deny intersections offer no
+resource selection, but can offer that separate host confirmation. Both retry
+paths warn that the entire command runs again and can repeat earlier effects.
+Native write/edit retain exact-target preflight approval, without this ancestor
+selection or host action.
 
 All attempts may remain visible in the streamed execution transcript. Before
 requesting approval for a detected violation, the extension streams
