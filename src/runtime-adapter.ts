@@ -8,6 +8,14 @@ import type { SandboxRuntime, SandboxViolation } from "./types.js";
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
+/** Carries the configured flag even when initialization fails; not process health. */
+export class SandboxInitializationFailure extends Error {
+  constructor(cause: unknown, readonly logMonitorEnabled: boolean) {
+    super(cause instanceof Error ? cause.message : "Sandbox initialization failed", { cause });
+    this.name = "SandboxInitializationFailure";
+  }
+}
+
 export function isUbuntuRelease(osRelease: string): boolean {
   const values = new Map(osRelease.split("\n").map(line => {
     const separator = line.indexOf("=");
@@ -39,6 +47,7 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
 }
 
 export function sandboxInitializationError(error: unknown): string {
+  if (error instanceof SandboxInitializationFailure) error = error.cause;
   const detail = error instanceof Error ? `${error.message}\n${error.cause instanceof Error ? error.cause.message : ""}` : String(error);
   if (/strace|ptrace|PTRACE/i.test(detail)) {
     return "Linux sandbox observation is unavailable because strace could not trace commands. Host execution was not attempted.";
@@ -56,30 +65,40 @@ export function sandboxInitializationError(error: unknown): string {
 }
 
 function resourceFromLine(line: string): string {
+  const filesystem = line.match(/\bdeny(?:\(\d+\))?\s+file-(?:read|write)(?:-[\w-]+)?\s+(.+)$/)?.[1];
+  if (filesystem) return filesystem.replace(/^(['"])(.*)\1$/, "$2");
   const quoted = line.match(/['"]((?:\/|~\/)[^'"\s]+)['"]/);
   const path = quoted ?? line.match(/((?:\/|~\/)[^\s,;]+)/);
   return path?.[1] ?? "unknown";
 }
 
+function operationFromLine(line: string): string {
+  return line.match(/\bdeny(?:\(\d+\))?\s+([\w-]+)/i)?.[1] ?? "";
+}
+
 function violationFromLine(line: string): SandboxViolation {
-  if (/network|connect|outbound/i.test(line)) return { kind: "network", resource: resourceFromLine(line), message: line };
-  if (/read|file-read/i.test(line)) return { kind: "filesystem.read", resource: resourceFromLine(line), message: line };
+  const operation = operationFromLine(line);
+  if (/^(?:network(?:-|$)|http-request$|connect$|outbound$)/i.test(operation)) return { kind: "network", resource: resourceFromLine(line), message: line };
+  if (/^file-read(?:-|$)/i.test(operation)) return { kind: "filesystem.read", resource: resourceFromLine(line), message: line };
   return { kind: "filesystem.write", resource: resourceFromLine(line), message: line };
 }
 
 /** Concrete adapter for @anthropic-ai/sandbox-runtime's per-command telemetry. */
 export class AnthropicSandboxRuntime implements SandboxRuntime {
   private readonly strace = new Map<string, StraceViolationObserver>();
-  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean) {}
+  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {}
 
-  static async initialize(settings: SandboxSettings): Promise<AnthropicSandboxRuntime> {
+  static async initialize(settings: SandboxSettings, enableLogMonitor = process.platform === "darwin"): Promise<AnthropicSandboxRuntime> {
     const ubuntu = await isUbuntu();
     if (ubuntu) {
       try { await promisify(execFile)(STRACE_BINARY, [...STRACE_ARGS, "/usr/bin/true"], { timeout: 5000 }); }
       catch (cause) { throw new Error("Ubuntu filesystem observation requires working strace.", { cause }); }
     }
-    await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu));
-    return new AnthropicSandboxRuntime(settings, ubuntu);
+    // Linux's startup-policy observer cannot account for per-command grants.
+    enableLogMonitor = process.platform === "darwin" && enableLogMonitor;
+    try { await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, enableLogMonitor); }
+    catch (cause) { throw new SandboxInitializationFailure(cause, enableLogMonitor); }
+    return new AnthropicSandboxRuntime(settings, ubuntu, enableLogMonitor);
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
@@ -100,8 +119,48 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   async getViolationsForCommand(commandId: string): Promise<readonly SandboxViolation[]> {
     const observer = this.strace.get(commandId);
     this.strace.delete(commandId);
-    const upstream = SandboxManager.getSandboxViolationStore().getViolationsForCommand(commandId)
-      .map(event => violationFromLine(event.line));
+    const store = SandboxManager.getSandboxViolationStore();
+    const read = (): SandboxViolation[] => store.getViolationsForCommand(commandId).flatMap(event => {
+      // Seatbelt also reports sysctl/Mach noise, which is not a supported
+      // filesystem or network capability and must not become "unknown" writes.
+      if (process.platform === "darwin" && !/^(?:file-(?:read|write)(?:-|$)|network(?:-|$)|http-request$)/i.test(operationFromLine(event.line))) return [];
+      let raw = event.line;
+      if (process.platform === "darwin") {
+        if (typeof event.rawLine !== "string") throw new Error("SDK raw violation data is unavailable. Reinstall dependencies with lifecycle scripts enabled.");
+        raw = event.rawLine;
+        if (/[\x00-\x1f\x7f-\x9f]/.test(raw)) throw new Error("SDK violation contains unsupported control characters; resource approval was not attempted.");
+      }
+      return [{ ...violationFromLine(raw), message: event.line }];
+    });
+    let upstream = read();
+    if (process.platform === "darwin" && this.logMonitorEnabled && upstream.length === 0) {
+      // SDK log events can arrive after process exit. Only this invocation's
+      // events end the bounded wait; an ordinary failure still returns empty.
+      upstream = await new Promise<SandboxViolation[]>((resolve, reject) => {
+        let unsubscribe: (() => void) | undefined;
+        let finished = false;
+        const finish = (result: SandboxViolation[], error?: unknown) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          unsubscribe?.();
+          if (error !== undefined) reject(error);
+          else resolve(result);
+        };
+        const check = (deadline = false) => {
+          try {
+            const result = read();
+            if (result.length > 0 || deadline) finish(result);
+          } catch (error) { finish([], error); }
+        };
+        const timer = setTimeout(() => check(true), 1000);
+        try {
+          unsubscribe = store.subscribe(() => check());
+          // subscribe delivers the current store synchronously as well.
+          if (finished) unsubscribe();
+        } catch (error) { finish([], error); }
+      });
+    }
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
   }
 

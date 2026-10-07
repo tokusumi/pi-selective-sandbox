@@ -1,0 +1,2 @@
+# Dependency diffs must retain the upstream text, including its whitespace.
+patches/*.patch -whitespace

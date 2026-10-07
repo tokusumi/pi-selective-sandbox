@@ -7,6 +7,7 @@ import type { RegisteredCommand, ToolDefinition } from "@earendil-works/pi-codin
 import selectiveSandboxExtension, { emitExecutorOutput, emitSandboxStatus, minimalWriteRoots, redactToolResult } from "../pi-extension.js";
 import { DEFAULT_WRITE_PROFILES } from "../config.js";
 import { AnthropicSandboxRuntime } from "../runtime-adapter.js";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   const tools: { name: string }[] = [];
@@ -59,11 +60,78 @@ test("parent approval removes redundant nested mount points", () => {
   ]), [write("/repo"), write("/other")]);
 });
 
-test("write fails closed without an interactive approval UI", async () => {
+test("write fails closed without an interactive approval UI", async t => {
+  t.mock.method(AnthropicSandboxRuntime, "initialize", async () =>
+    ({ logMonitorEnabled: true } as unknown as AnthropicSandboxRuntime));
   const tools: unknown[] = [];
   await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined, registerTool: (tool: unknown) => { tools.push(tool); } } as never);
   const write = tools.find((tool: any) => tool.name === "write") as any;
   await assert.rejects(write.execute("no-ui", { path: "/var/pi-selective-denied/file.txt", content: "no" }, new AbortController().signal, () => {}));
+});
+
+test("an explicitly false macOS SDK monitor flag forces all tools off and blocks on", async t => {
+  const base = await mkdtemp(join(tmpdir(), "pi-selective-monitor-off-"));
+  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  process.env.PI_CODING_AGENT_DIR = base;
+  Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+  t.after(async () => {
+    Object.defineProperty(process, "platform", platform);
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    await rm(base, { recursive: true, force: true });
+  });
+  await mkdir(join(base, "pi-selective-sandbox"));
+  await writeFile(join(base, "pi-selective-sandbox", "config.json"), JSON.stringify({
+    filesystem: { disabledDefaultProfiles: DEFAULT_WRITE_PROFILES }
+  }));
+  let failInitialization = false;
+  t.mock.method(SandboxManager, "initialize", async () => {
+    if (failInitialization) throw new Error("SDK startup unavailable for this test");
+  });
+  const actualInitialize = AnthropicSandboxRuntime.initialize.bind(AnthropicSandboxRuntime);
+  const initialize = t.mock.method(AnthropicSandboxRuntime, "initialize", (settings: Parameters<typeof actualInitialize>[0]) => actualInitialize(settings, false));
+  const stderr = t.mock.method(console, "warn", () => {});
+  for (const scenario of [{ hasUI: true, failure: false }, { hasUI: false, failure: false }, { hasUI: true, failure: true }, { hasUI: false, failure: true }]) {
+    const hasUI = scenario.hasUI;
+    failInitialization = scenario.failure;
+    const initializations = initialize.mock.callCount(), warnings = stderr.mock.callCount();
+    const tools = new Map<string, ToolDefinition>();
+    const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
+    await selectiveSandboxExtension({
+      on: () => undefined,
+      registerCommand: (name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) => { commands.set(name, command); },
+      registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); }
+    } as never);
+    const notices: { message: string; level: string }[] = [];
+    const context = { cwd: process.cwd(), hasUI, ui: { notify: (message: string, level: string) => { notices.push({ message, level }); } } } as never;
+    const signal = new AbortController().signal;
+    const execute = (name: string, params: unknown) => tools.get(name)!.execute(name, params, signal, () => {}, context);
+    const target = join(base, "file.txt");
+    // Native calls can arrive together before bash initializes anything.
+    await Promise.all([
+      execute("write", { path: target, content: "before" }),
+      execute("write", { path: join(base, "parallel.txt"), content: "parallel" })
+    ]);
+    await execute("edit", { path: target, edits: [{ oldText: "before", newText: "after" }] });
+    assert.equal(await readFile(target, "utf8"), "after");
+    const output = await execute("bash", { command: "printf monitor-disabled" });
+    assert.match(JSON.stringify(output.content), /monitor-disabled/);
+    assert.equal(initialize.mock.callCount(), initializations + 1);
+    assert.equal(notices.length, hasUI ? 1 : 0);
+    assert.equal(stderr.mock.callCount(), warnings + (hasUI ? 0 : 1));
+    const message = hasUI ? notices[0].message : String(stderr.mock.calls.at(-1)!.arguments[0]);
+    if (hasUI) assert.equal(notices[0].level, "warning");
+    else assert.match(message, /^WARNING:/);
+    assert.match(message, /log monitoring.*disabled/i);
+    assert.match(message, /Bash runs on the host/);
+    assert.match(message, /native mutation approvals are bypassed/);
+    await commands.get("selective-sandbox")!.handler("on", context);
+    if (hasUI) assert.equal(notices.at(-1)!.level, "warning");
+    else assert.equal(stderr.mock.callCount(), warnings + 2);
+    await execute("write", { path: target, content: "still off" });
+    assert.equal(await readFile(target, "utf8"), "still off");
+  }
 });
 
 test("on/off toggles all tool boundaries, retains redaction, and resets on reload", async t => {

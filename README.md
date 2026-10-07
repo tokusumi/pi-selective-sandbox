@@ -93,6 +93,19 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 | Other Linux | Isolated | Isolated | Isolated |
 | Ubuntu | Isolated | Isolated | Unrestricted |
 
+On macOS, SDK log monitoring is explicitly enabled. SDK stream events supply
+command-correlated denials; filesystem resources are read from raw event data,
+not sanitized presentation text. After a failed command, the adapter waits up
+to one second for a matching supported SDK event before returning an ordinary
+failure without approval.
+
+If the SDK initialization flag `enableLogMonitor` is explicitly `false` on
+macOS, enforcement is forced off for all three tools before executing an enabled
+tool. A **warning** (UI notification, or stderr in headless mode) states that
+bash runs on the host and native mutation approvals are bypassed. `/selective-sandbox on` cannot override this condition;
+restore the SDK flag and reload. This checks only the flag, not the monitor's
+process health. Initialization failures alone do not trigger automatic off.
+
 The extension detects Ubuntu from `ID=ubuntu` in `/etc/os-release` and sets
 `network.allowAllUnixSockets: true` for every Ubuntu release. Unix-socket
 isolation is not provided on this execution path. Bubblewrap still enforces
@@ -136,6 +149,15 @@ npm ci
 npm run check
 npm test
 ```
+
+The SDK is pinned to `0.0.76`. `npm ci` applies
+`patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
+Git and checking exact SDK file hashes before and after application. Do not
+skip lifecycle scripts. The patch fixes record attribution and preserves raw
+resources while keeping the SDK's existing log-stream/store execution path and
+sanitized presentation text. Unexpected versions or partial/local modifications
+fail installation rather than silently accepting an incomplete patch. An SDK
+upgrade requires reviewing the patch and rerunning the regression tests.
 
 ## Acknowledgements
 

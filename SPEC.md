@@ -26,6 +26,14 @@ is not a grant and is not persisted. Missing or unsupported arguments display
 usage without changing the mode. The sandbox-first and fail-closed contracts
 below apply while enforcement is enabled.
 
+On macOS only, an explicitly `false` SDK initialization flag
+`enableLogMonitor` forces enforcement off for all three tools before an enabled
+tool executes. A warning must state that bash will run on the host and native
+mutation approvals will be bypassed. `/selective-sandbox on` cannot override
+this condition; the SDK flag must be restored and the extension reloaded. This
+condition is the flag value only: initialization errors or monitor-process
+failures do not by themselves trigger automatic off.
+
 - `bash` is a subprocess execution surface. Normal commands are wrapped by the
   OS sandbox runtime before the command runner starts them.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,
