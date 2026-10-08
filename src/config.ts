@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
+import { DEFAULT_NETWORK_PROFILES, normalizeNetworkPattern } from "./network-policy.js";
 
 export type SelectiveSandboxConfig = {
+  network?: { extraAllowedDomains: string[]; disabledDefaultProfiles?: string[] };
   filesystem: {
     extraWritableRoots: string[];
     disabledDefaultProfiles: string[];
@@ -30,7 +32,7 @@ function rejectUnknownFields(value: Record<string, unknown>, allowed: readonly s
 
 export function parseConfig(value: unknown): SelectiveSandboxConfig {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("config must be an object");
-  rejectUnknownFields(value as Record<string, unknown>, ["filesystem"], "config");
+  rejectUnknownFields(value as Record<string, unknown>, ["filesystem", "network"], "config");
   const filesystem = (value as { filesystem?: unknown }).filesystem;
   if (filesystem !== undefined && (typeof filesystem !== "object" || filesystem === null || Array.isArray(filesystem))) {
     throw new Error("filesystem must be an object");
@@ -41,10 +43,24 @@ export function parseConfig(value: unknown): SelectiveSandboxConfig {
   const knownProfiles: readonly string[] = DEFAULT_WRITE_PROFILES;
   const unknown = disabledDefaultProfiles.find(profile => !knownProfiles.includes(profile));
   if (unknown) throw new Error(`unknown default write profile: ${unknown}`);
-  return { filesystem: {
+  const network = (value as { network?: unknown }).network;
+  if (network !== undefined && (typeof network !== "object" || network === null || Array.isArray(network))) throw new Error("network must be an object");
+  const networkFields = (network ?? {}) as { extraAllowedDomains?: unknown; disabledDefaultProfiles?: unknown };
+  rejectUnknownFields(networkFields as Record<string, unknown>, ["extraAllowedDomains", "disabledDefaultProfiles"], "network");
+  const disabledNetworkProfiles = stringArray(networkFields.disabledDefaultProfiles, "network.disabledDefaultProfiles");
+  const knownNetworkProfiles: readonly string[] = DEFAULT_NETWORK_PROFILES;
+  const unknownNetworkProfile = disabledNetworkProfiles.find(profile => !knownNetworkProfiles.includes(profile));
+  if (unknownNetworkProfile) throw new Error(`unknown default network profile: ${unknownNetworkProfile}`);
+  const extraAllowedDomains = [...new Set(stringArray(networkFields.extraAllowedDomains, "network.extraAllowedDomains").map(normalizeNetworkPattern))];
+  const parsed: SelectiveSandboxConfig = { filesystem: {
     extraWritableRoots: stringArray(fields.extraWritableRoots, "filesystem.extraWritableRoots"),
     disabledDefaultProfiles
   } };
+  if (network !== undefined) {
+    parsed.network = { extraAllowedDomains };
+    if (networkFields.disabledDefaultProfiles !== undefined) parsed.network.disabledDefaultProfiles = disabledNetworkProfiles;
+  }
+  return parsed;
 }
 
 /** A missing file uses defaults; an existing invalid security config is reported as invalid. */
@@ -53,7 +69,7 @@ export async function loadConfig(path: string, diagnostic: (message: string) => 
     return { valid: true, config: parseConfig(JSON.parse(await readFile(path, "utf8"))) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { valid: true, config: DEFAULT_CONFIG };
-    diagnostic(`Invalid pi-selective-sandbox config at ${path}; using a deny-by-default write policy: ${error instanceof Error ? error.message : String(error)}`);
+    diagnostic(`Invalid pi-selective-sandbox config at ${path}; using a deny-by-default write policy and empty network allowlist: ${error instanceof Error ? error.message : String(error)}`);
     return { valid: false };
   }
 }

@@ -54,7 +54,7 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 ## Behavior
 
-The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and GitHub API access for authenticated `gh` use. The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
+The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
 When that startup directory is writable and belongs to a Git repository, a blocked Git metadata write offers the shared Git directory and, only if it is outside the shared directory, the worktree's Git directory. Git writes can span the index, objects, refs, reflogs, tags, and worktree records; this approval lets a multi-step operation retry without reaching a second Git metadata denial after it has already changed repository state. The shared directory grant can affect other worktrees and Git configuration or hooks, so the approval prompt names that scope. Configured deny paths still apply, and this access does not change the native `write` or `edit` boundaries.
 
@@ -68,18 +68,69 @@ For `write` and `edit`, a canonical target inside configured writable roots exec
 
 Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash`, `write`, and `edit`. Subsequent bash commands run directly on the host, and native file mutations skip boundary approvals. Bash output redaction remains active. Run `/selective-sandbox on` to enable enforcement again. The setting stays in memory and is not saved to configuration or grants; Pi's `/reload` command (which reloads extensions) or restarting Pi also restores enforcement. Missing or unsupported arguments display usage and leave enforcement unchanged.
 
-### Filesystem configuration
+### Network permission (macOS)
 
-Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. A missing file uses defaults. An existing malformed file, invalid field, or unknown profile name emits a diagnostic and installs a deny-by-default write policy while still replacing all three tools. Extra roots remain inside the sandbox and do not authorize host replay.
+When a proxy-aware command reaches a blocked destination, the approval prompt
+now offers **Allow resource and rerun command** for an exact `host:port`, with
+once, session, or project scope. The retry stays in the sandbox; filesystem
+restrictions remain in force. A different port or hostname needs separate
+approval. Unknown socket denials and DNS/private-address protection failures
+cannot be widened by guessing a destination from the shell command.
+
+Each macOS attempt has its own authenticated HTTP/SOCKS proxy. Approvals do not
+leak into concurrent commands or change the SDK's global allowlist. The proxy
+closes when the attempt ends, including open connections and background
+children's access. This permits proxy-aware HTTP/HTTPS and TCP clients, not raw
+TCP/UDP or unrestricted networking. Network isolation and network permissions
+are macOS-only features. Linux network isolation is not a supported guarantee;
+Linux filesystem sandboxing remains separate.
+
+### Filesystem and network configuration
+
+Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. A missing file uses defaults. An existing malformed file, invalid field, or unknown profile name emits a diagnostic and installs a deny-by-default write policy and empty network allowlist while still replacing all three tools. Extra roots remain inside the sandbox and do not authorize host replay.
 
 ```json
 {
   "filesystem": {
     "extraWritableRoots": ["~/.cache/uv", "/mnt/build-cache"],
     "disabledDefaultProfiles": []
+  },
+  "network": {
+    "extraAllowedDomains": ["packages.example.com:443"],
+    "disabledDefaultProfiles": []
   }
 }
 ```
+
+macOS network defaults are grouped into independently switchable profiles:
+
+| Profile | Default destinations |
+| --- | --- |
+| `git` | `github.com`, `api.github.com`, `*.github.com`; HTTPS to `gitlab.com`, `bitbucket.org`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| `node` | HTTPS to `registry.npmjs.org`, `registry.yarnpkg.com`, `nodejs.org`, `get.pnpm.io` |
+| `rust` | HTTPS to `crates.io`, `index.crates.io`, `static.crates.io`, `static.rust-lang.org`, `sh.rustup.rs` |
+| `python` | HTTPS to `pypi.org`, `files.pythonhosted.org`, `python.org`, `www.python.org`, `astral.sh` |
+
+HTTPS means TCP port 443 only. The original GitHub host patterns retain their
+existing all-port behavior. These profiles group destinations, not executables:
+any sandboxed command may reach an enabled destination. They cover common
+package installs and toolchain downloads, not every mirror, redirect CDN, or
+self-hosted registry.
+
+Set `network.disabledDefaultProfiles` to, for example, `["node", "python"]`
+to remove those defaults, or all four names to start with an empty allowlist.
+Disabling a profile removes its baseline allowances; it is not a hard deny of
+explicit additions or later approvals. Filesystem profiles are independent.
+
+`network.extraAllowedDomains` adds startup allowances to the enabled profiles.
+Entries are deduplicated. Use hostnames or IP literals, optionally `:port`;
+bracket IPv6 (for example, `[::1]:8080`). Without a port, all TCP ports for that
+host are permitted. `*.example.com` permits strict subdomains, not the apex.
+URLs, paths, bare `*`, and broad wildcards such as `*.com` are rejected. These
+settings grant no host replay. For explicitly allowed local/private destinations,
+override the SDK's NO_PROXY in the client (for example, curl `--noproxy ''`) so
+the connection goes through the sandbox proxy. Per-attempt proxies also inherit
+the SDK's upstream HTTP_PROXY / HTTPS_PROXY / NO_PROXY routing.
 
 Paths beginning with `~/` are expanded, relative paths are resolved against the startup working directory, and paths are canonicalized. Available default profile names are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. The last profile mirrors the sandbox runtime's implicit `~/.npm/_logs` and `~/.claude/debug` allowances for native tools; disabling it adds explicit runtime denies. For example, set `disabledDefaultProfiles` to `["cargo-cache"]` to remove Cargo's default writable cache profile.
 
@@ -90,8 +141,8 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 | Platform | Filesystem | Network | Unix sockets |
 | --- | --- | --- | --- |
 | macOS | Isolated | Isolated | Isolated |
-| Other Linux | Isolated | Isolated | Isolated |
-| Ubuntu | Isolated | Isolated | Unrestricted |
+| Other Linux | Isolated | Not supported | Isolated |
+| Ubuntu | Isolated | Not supported | Unrestricted |
 
 On macOS, SDK log monitoring is explicitly enabled. SDK stream events supply
 command-correlated denials; filesystem resources are read from raw event data,
@@ -109,7 +160,8 @@ process health. Initialization failures alone do not trigger automatic off.
 The extension detects Ubuntu from `ID=ubuntu` in `/etc/os-release` and sets
 `network.allowAllUnixSockets: true` for every Ubuntu release. Unix-socket
 isolation is not provided on this execution path. Bubblewrap still enforces
-filesystem and network-namespace isolation, and this mode is not host replay.
+filesystem isolation, and this mode is not host replay. Linux network isolation
+is outside the supported feature contract.
 On the tested Ubuntu 24.04 host, restrictive AppArmor policy blocks the nested
 user namespace that the runtime's Unix-socket isolation would require.
 
@@ -153,9 +205,9 @@ npm test
 The SDK is pinned to `0.0.76`. `npm ci` applies
 `patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
 Git and checking exact SDK file hashes before and after application. Do not
-skip lifecycle scripts. The patch fixes record attribution and preserves raw
-resources while keeping the SDK's existing log-stream/store execution path and
-sanitized presentation text. Unexpected versions or partial/local modifications
+skip lifecycle scripts. The patch fixes record attribution, preserves raw resources, and lets the
+macOS wrapper use an embedder-owned per-invocation proxy port/token. It retains
+the SDK's log-stream/store execution path and sanitized presentation text. Unexpected versions or partial/local modifications
 fail installation rather than silently accepting an incomplete patch. An SDK
 upgrade requires reviewing the patch and rerunning the regression tests.
 

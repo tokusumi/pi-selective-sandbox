@@ -6,6 +6,7 @@ import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
+import { resolveNetworkDomains } from "./network-policy.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
 import { gitApprovalPaths, pathContains, resolveGitWritePaths, worktreeRemovalParent, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
@@ -126,7 +127,7 @@ export function createApprovalProvider(
       const message = request.kind === "escalation"
         ? "Sandbox blocked this operation:\n\n" + request.command + (hasSandboxCandidates
           ? "\n\nSandbox observation (informational for host replay):\n" + requested
-          : "\n\nThe violation intersects a configured deny root, so sandbox widening cannot succeed; only exact-command host replay is available.")
+          : "\n\nNo eligible sandbox resource is available (for example, a configured deny root or an unsupported network denial); only exact-command host replay is available.")
           + "\n\nApproving a resource never approves leaving the sandbox. Approving host execution never grants a resource capability."
           + "\n\nThis command has already run in the sandbox. A retry starts the entire command again from the beginning and may repeat earlier side effects, including file changes or external operations." + gitMetadataWarning + broadParentWarning + sandboxScope + hostScope
         : "Permission required before this file mutation:\n\n" + request.command + "\n\nRequested capability:\n" + requested
@@ -203,7 +204,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy }).then(value => {
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy, allowedDomains: loadedConfig.valid
+      ? resolveNetworkDomains(loadedConfig.config.network)
+      : [] }).then(value => {
       runtime = value;
       monitorDisabled = process.platform === "darwin" && value.logMonitorEnabled === false;
     });
@@ -247,10 +250,10 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),
-              approvals: createApprovalProvider(context as unknown as ApprovalUI, grants, project, hostGrants, gitWritePaths),
+              approvals: createApprovalProvider(context, grants, project, hostGrants, gitWritePaths),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
-              getSandboxCapabilities: async () => { const sessionId = (context as unknown as ApprovalUI).sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
+              getSandboxCapabilities: async () => { const sessionId = context.sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
               canonicalizeCapabilities: async capabilities => {
                 const boundary = await MutationBoundary.create(commandCwd, writePolicy);
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));

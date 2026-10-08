@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import fs from "node:fs/promises";
+import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import { SandboxManager, SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
 import { AnthropicSandboxRuntime, buildSandboxRuntimeConfig, isUbuntuRelease, sandboxInitializationError } from "../runtime-adapter.js";
@@ -243,4 +244,51 @@ test("unavailable strace is reported without offering host execution", () => {
   const message = sandboxInitializationError(new Error("Ubuntu filesystem observation requires working strace."));
   assert.match(message, /strace could not trace commands/);
   assert.match(message, /Host execution was not attempted/);
+});
+
+
+test("proxy denials identify exact network endpoints without parsing shell text", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  record("proxy-denial", "deny network-outbound Registry.NPMJS.org:443 (host is not on the allow list)");
+  assert.equal((await runtime.getViolationsForCommand("proxy-denial"))[0].resource, "registry.npmjs.org:443");
+});
+
+
+test("macOS attempts enforce immutable network grants in separate authenticated proxies", async t => {
+  const { runtime } = await macOSFixture(t);
+  const target = http.createServer((_request, response) => response.end("allowed"));
+  await new Promise<void>((resolve, reject) => { target.once("error", reject); target.listen(0, "127.0.0.1", resolve); });
+  t.after(() => new Promise<void>(resolve => target.close(() => resolve())));
+  const targetPort = (target.address() as { port: number }).port;
+  const endpoint = `127.0.0.1:${targetPort}`;
+  const wrap = t.mock.method(SandboxManager, "wrapWithSandbox", async (..._args: Parameters<typeof SandboxManager.wrapWithSandbox>) => "sandbox");
+  const proxies: { port: number; token: string }[] = [];
+  for (const [index, grants] of [[], [{ kind: "network" as const, resource: endpoint }]].entries()) {
+    const id = `proxy-${index}`;
+    await runtime.wrap("curl example", { commandId: id, commandText: "curl example", extraCapabilities: grants });
+    t.after(() => runtime.forgetCommand(id));
+    const options = wrap.mock.calls.at(-1)!.arguments[4];
+    const proxy = options && Reflect.get(options, "networkProxy");
+    assert.ok(proxy, "each attempt needs a proxy, not a global config update");
+    proxies.push(proxy);
+  }
+  assert.notEqual(proxies[0].port, proxies[1].port);
+  assert.notEqual(proxies[0].token, proxies[1].token);
+  const request = (proxy: { port: number; token: string }, port: number, token = proxy.token) => new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const req = http.get({ host: "127.0.0.1", port: proxy.port, path: `http://127.0.0.1:${port}/`,
+      headers: { "Proxy-Authorization": `Basic ${Buffer.from(`srt.forged:${token}`).toString("base64")}` } }, response => {
+      let body = "";
+      response.on("data", chunk => body += chunk);
+      response.on("end", () => resolve({ status: response.statusCode!, body }));
+    });
+    req.on("error", reject);
+  });
+  assert.equal((await request(proxies[0], targetPort)).status, 403);
+  assert.deepEqual(await request(proxies[1], targetPort), { status: 200, body: "allowed" });
+  assert.equal((await request(proxies[1], targetPort === 65535 ? 65534 : targetPort + 1)).status, 403);
+  assert.equal((await request(proxies[1], targetPort, proxies[0].token)).status, 407);
+  const observed = await runtime.getViolationsForCommand("proxy-0");
+  assert.equal(observed[0].resource, endpoint, "client attribution cannot redirect denial to another invocation");
+  await runtime.forgetCommand("proxy-1");
+  await assert.rejects(request(proxies[1], targetPort), /ECONNREFUSED|ECONNRESET/);
 });
