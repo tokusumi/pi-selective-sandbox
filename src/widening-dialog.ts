@@ -28,18 +28,23 @@ export function displayText(text: string): string {
 export function wideningSummary(options: WideningDialogOptions, selected: readonly Capability[], duration: ApprovalDuration): string {
   const { request } = options;
   const targets = request.observedCapabilities ?? request.capabilities;
+  const hasNetwork = selected.some(scope => scope.kind === "network");
+  const hasWrites = selected.some(scope => scope.kind === "filesystem.write");
   return [
-    "Allow write access in sandbox", "", "Blocked target", ...targets.map(target => `  ${displayText(target.resource)}`),
-    "", "Allow access to", ...selected.map(scope => `  ${displayText(scope.resource)}`),
-    selected.some(scope => scope.resource === "/")
+    hasNetwork ? "Allow resource access in sandbox" : "Allow write access in sandbox",
+    "", "Blocked target", ...targets.map(target => `  ${displayText(target.resource)}`),
+    "", "Allow access to", ...selected.map(scope => hasNetwork ? `  ${scope.kind}: ${displayText(scope.resource)}` : `  ${displayText(scope.resource)}`),
+    ...(hasNetwork ? ["Only the listed exact network endpoints are permitted; other hosts and ports remain blocked."] : []),
+    ...(hasWrites ? [selected.some(scope => scope.kind === "filesystem.write" && scope.resource === "/")
       ? "WARNING: Allows writes across the entire filesystem. Existing deny rules still apply."
-      : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply.",
+      : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply."] : []),
     ...options.warnings(selected), "", `Duration: ${durationLabels[duration]}`,
     ...(duration === "project" && options.projectId ? [`Project: ${displayText(options.projectId)}`] : []),
     "", "Command", displayText(request.command),
     ...(request.commandIdentity ? [`Working directory: ${displayText(request.commandIdentity.cwd)}`] : []),
     "", "The entire command will run again and may repeat earlier side effects.",
-    "This approval keeps the command inside the sandbox."
+    "This approval keeps the command inside the sandbox.",
+    "Approving a resource never approves leaving the sandbox. Approving host execution never grants a resource capability."
   ].join("\n");
 }
 
@@ -126,6 +131,21 @@ export function createWideningDialog(options: WideningDialogOptions, theme: Pick
 
 export async function showWideningDialog(context: EscalationUI, options: WideningDialogOptions): Promise<WideningChoice> {
   if (!context.hasUI || !context.ui || context.signal?.aborted) return { action: "deny" };
+  // Endpoint grants have no filesystem ancestors. Keep every resource fixed
+  // for network/mixed requests and select only duration and final action.
+  if (options.request.capabilities.some(capability => capability.kind === "network")) {
+    const selected = options.request.capabilities;
+    const available = options.durations(selected);
+    const chosen = await context.ui.select("Permission duration\n\n" + wideningSummary(options, selected, "once"),
+      available.map(value => durationLabels[value]), { signal: context.signal });
+    const duration = available.find(value => durationLabels[value] === chosen);
+    if (!duration || context.signal?.aborted) return { action: "deny" };
+    const action = await context.ui.select(wideningSummary(options, selected, duration),
+      ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
+    if (context.signal?.aborted) return { action: "deny" };
+    if (action === "Allow and retry") return { action: "allow", capabilities: selected, duration };
+    return { action: action === "Run outside sandbox…" ? "host" : "deny" };
+  }
   if (context.mode === "tui" && context.ui.custom) {
     return await context.ui.custom<WideningChoice>((tui, theme, _keys, done) => {
       let settled = false;

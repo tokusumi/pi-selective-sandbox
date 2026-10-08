@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const project = fileURLToPath(new URL("../../", import.meta.url));
-const names = ["macos-sandbox-utils.js", "macos-sandbox-utils.d.ts", "sandbox-violation-store.js"];
+const names = ["sandbox-manager.js", "sandbox-manager.d.ts", "macos-sandbox-utils.js", "macos-sandbox-utils.d.ts", "sandbox-violation-store.js"];
 
 async function installFixture(t: TestContext, nested = false) {
   const base = await mkdtemp(join(tmpdir(), "pi-sdk-patch-"));
@@ -43,7 +43,7 @@ test("SDK patch applies to a package nested inside another Git repository", asyn
   await run("git", ["apply", "--reverse", "--", fixture.patch], {
     cwd: fixture.root, env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(fixture.root) }
   });
-  assert.doesNotMatch(await readFile(join(fixture.dist, names[0]), "utf8"), /new StringDecoder/);
+  assert.doesNotMatch(await readFile(join(fixture.dist, "macos-sandbox-utils.js"), "utf8"), /new StringDecoder/);
   assert.match((await fixture.install()).stdout, /Applied sandbox-runtime/);
 });
 
@@ -55,7 +55,7 @@ test("SDK patch refuses version drift before modifying dependencies", async t =>
 
 test("SDK patch refuses locally modified or partially patched files", async t => {
   const fixture = await installFixture(t);
-  const file = join(fixture.dist, names[0]);
+  const file = join(fixture.dist, "macos-sandbox-utils.js");
   const modified = await readFile(file, "utf8") + "\n// local modification\n";
   await writeFile(file, modified);
   await assert.rejects(fixture.install(), /refusing to apply a partial patch/);

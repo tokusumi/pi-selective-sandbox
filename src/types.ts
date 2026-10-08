@@ -19,10 +19,12 @@ export type CommandResult = {
 };
 
 export type SandboxRuntime = {
+  /** True only when endpoint grants are enforced per invocation. */
+  supportsNetworkWidening?: boolean;
   wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
   getViolationsForCommand(commandId: string): readonly SandboxViolation[] | Promise<readonly SandboxViolation[]>;
   traceSinkForCommand?(commandId: string): ((chunk: Buffer) => void) | undefined;
-  forgetCommand?(commandId: string): void;
+  forgetCommand?(commandId: string): void | Promise<void>;
 };
 
 export type CommandRunner = {

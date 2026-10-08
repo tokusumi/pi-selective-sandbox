@@ -305,3 +305,54 @@ test("a repeat violation under the approved capability does not prompt again", a
   assert.equal(runs, 2);
   assert.deepEqual(offered, [["/outside"]]);
 });
+
+// Network resources must remain exact endpoints and never authorize a host run.
+test("network denial offers an exact endpoint and retries only in the sandbox", async () => {
+  let runs = 0;
+  const applied: unknown[] = [];
+  const executor = new SelectiveSandboxExecutor({
+    runtime: Object.assign({
+      wrap: async (_command: string, context: Parameters<SandboxRuntime["wrap"]>[1]) => { applied.push([...(context.extraCapabilities ?? [])]); return "sandbox"; },
+      getViolationsForCommand: () => [{ kind: "network" as const, resource: "registry.npmjs.org:443" }]
+    }, { supportsNetworkWidening: true }),
+    runner: { runSandbox: async () => result(++runs === 1 ? 1 : 0), runHost: async () => { throw new Error("unexpected host replay"); } },
+    policy: new CapabilityPolicy([]),
+    canonicalizeCapabilities: async () => { throw new Error("network is not a filesystem path"); },
+    approvals: { request: async request => {
+      assert.deepEqual(request.capabilities, [{ kind: "network", resource: "registry.npmjs.org:443" }]);
+      return "sandbox-allow-once";
+    } }
+  });
+  assert.equal((await executor.execute("npm view example", "network")).disposition, "sandbox");
+  assert.equal(runs, 2);
+  assert.deepEqual(applied, [[], [{ kind: "network", resource: "registry.npmjs.org:443" }]]);
+});
+
+test("unknown endpoints and unsupported runtimes cannot offer network widening", async () => {
+  for (const resource of ["unknown", "/tmp/socket", "*.example.com:443", "example.com:0", "example.com:443/path", "example.com:443\n", "https://example.com"]) {
+    const executor = new SelectiveSandboxExecutor({
+      runtime: Object.assign({ wrap: async () => "sandbox", getViolationsForCommand: () => [{ kind: "network" as const, resource }] }, { supportsNetworkWidening: true }),
+      runner: { runSandbox: async () => result(1), runHost: async () => { throw new Error("unexpected host replay"); } },
+      policy: new CapabilityPolicy([]),
+      approvals: { request: async request => { assert.deepEqual(request.capabilities, []); return "deny"; } }
+    });
+    assert.equal((await executor.execute("connect", "invalid")).disposition, "denied");
+  }
+});
+
+
+test("unsupported runtimes neither consume nor offer stored network grants", async () => {
+  let applied: unknown;
+  const executor = new SelectiveSandboxExecutor({
+    runtime: {
+      wrap: async (_command, context) => { applied = context.extraCapabilities; return "sandbox"; },
+      getViolationsForCommand: () => [{ kind: "network", resource: "example.com:443" }]
+    },
+    runner: { runSandbox: async () => result(1), runHost: async () => { throw new Error("unexpected host replay"); } },
+    getSandboxCapabilities: async () => [{ kind: "network", resource: "example.com:443" }],
+    policy: new CapabilityPolicy([]),
+    approvals: { request: async request => { assert.deepEqual(request.capabilities, []); return "deny"; } }
+  });
+  assert.equal((await executor.execute("connect", "unsupported")).disposition, "denied");
+  assert.deepEqual(applied, []);
+});

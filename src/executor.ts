@@ -3,6 +3,7 @@ import { validateWideningSelection } from "./resource-selection.js";
 import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
+import { canonicalNetworkEndpoint } from "./network-policy.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority } from "./types.js";
 
 export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
@@ -15,31 +16,38 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     const { runtime, runner, policy, approvals, skills } = this.options;
     if (!runtime) return this.unavailable();
     if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return this.finish(await runner.runHost(command), "host", []);
-    const granted = [...(await this.options.getSandboxCapabilities?.() ?? [])];
+    const granted = [...(await this.options.getSandboxCapabilities?.() ?? [])]
+      .filter(capability => capability.kind !== "network" || runtime.supportsNetworkWidening);
     let commandId = toolCallId;
     let approvalsUsed = 0;
     let priorViolations: readonly Capability[] = [];
     for (;;) {
       let attempt: CommandResult;
       try { attempt = await this.runSandbox(command, commandId, granted); }
-      catch (error) { runtime.forgetCommand?.(commandId); return this.unavailable(error); }
+      catch (error) { await runtime.forgetCommand?.(commandId); return this.unavailable(error); }
       if (approvalsUsed > 0) this.status(`retry exit=${attempt.exitCode}`);
-      if (attempt.exitCode === 0) { runtime.forgetCommand?.(commandId); return this.finish(attempt, "sandbox", priorViolations); }
+      if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return this.finish(attempt, "sandbox", priorViolations); }
 
       let observed;
       try { observed = await runtime.getViolationsForCommand(commandId); }
-      finally { runtime.forgetCommand?.(commandId); }
+      finally { await runtime.forgetCommand?.(commandId); }
       if (observed.length === 0) return this.finish(attempt, "sandbox", priorViolations);
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
       const wideningBlocked = prepared === undefined;
+      const networkCandidates: Capability[] = runtime.supportsNetworkWidening ? observed.flatMap(violation => {
+        const resource = violation.kind === "network" ? canonicalNetworkEndpoint(violation.resource) : undefined;
+        return resource ? [{ kind: "network" as const, resource }] : [];
+      }) : [];
       const covered = (candidate: Capability) => granted.some(capability => capability.kind === candidate.kind
         && (capability.kind === "filesystem.write" ? pathContains(capability.resource, candidate.resource) : capability.resource === candidate.resource));
-      const caps = wideningBlocked ? [] : prepared.filter(candidate => !covered(candidate));
+      const candidates = [...(prepared ?? []), ...networkCandidates];
+      const caps = wideningBlocked ? [] : [...new Map(candidates.map(candidate => [`${candidate.kind}\0${candidate.resource}`, candidate])).values()]
+        .filter(candidate => !covered(candidate));
       const uncovered = observed.filter(violation => !covered(violation));
-      // A write already covered by the current authority cannot make another
-      // retry useful. Other violation kinds can still offer host replay.
-      if (!wideningBlocked && caps.length === 0 && uncovered.every(violation => violation.kind === "filesystem.write")) return this.finish(attempt, "sandbox", observed);
+      // Covered telemetry cannot make another retry useful. Unsupported
+      // network/read denials can still offer exact-command host replay.
+      if (!wideningBlocked && caps.length === 0 && (uncovered.length === 0 || uncovered.every(violation => violation.kind === "filesystem.write"))) return this.finish(attempt, "sandbox", observed);
       const violations = uncovered.length > 0 ? uncovered : observed;
       if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(attempt, "denied", violations);
       if (approvalsUsed >= MAX_SANDBOX_APPROVALS) return this.finish(attempt, "sandbox", violations);

@@ -186,3 +186,31 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-vio
              line: sanitizeViolationText(violation.line).replace(/[<>]/g, ''),
          });
          this.totalCount++;
+diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
+--- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
++++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
+@@ -1296,9 +1296,9 @@
+                 commandId,
+                 needsNetworkRestriction,
+                 // Only pass proxy ports if proxy is running (when there are domains to filter)
+-                httpProxyPort: needsNetworkProxy ? getProxyPort() : undefined,
+-                socksProxyPort: needsNetworkProxy ? getSocksProxyPort() : undefined,
+-                proxyAuthToken: needsNetworkProxy ? proxyAuthToken : undefined,
++                httpProxyPort: needsNetworkProxy ? (options?.networkProxy?.port ?? getProxyPort()) : undefined,
++                socksProxyPort: needsNetworkProxy ? (options?.networkProxy?.port ?? getSocksProxyPort()) : undefined,
++                proxyAuthToken: needsNetworkProxy ? (options?.networkProxy?.token ?? proxyAuthToken) : undefined,
+                 caCertPath: mitmCA?.trustBundlePath,
+                 javaAgentJarPath: needsNetworkProxy ? javaAgentJarPath : undefined,
+                 readConfig,
+diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
+--- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
++++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
+@@ -25,6 +25,8 @@
+  * `customConfig`).
+  */
+ export type WrapWithSandboxOptions = {
++    /** Embedder-owned per-invocation proxy. macOS only; Seatbelt allows only its port. */
++    networkProxy?: { port: number; token: string };
+     /**
+      * Opaque per-invocation correlation key. Violations observed while the
+      * wrapped command runs (seatbelt log lines, seccomp events, proxy denies)

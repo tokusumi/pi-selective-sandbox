@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 import type { WritePolicy } from "./filesystem-policy.js";
 import { StraceViolationObserver, STRACE_ARGS, STRACE_BINARY } from "./strace-observer.js";
 import type { SandboxRuntime, SandboxViolation } from "./types.js";
+import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
+import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
 
@@ -40,7 +42,7 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
     },
     network: {
       // GitHub CLI remains usable with its normal credential helpers.
-      allowedDomains: [...(settings.allowedDomains ?? ["api.github.com", "github.com", "*.github.com"])], deniedDomains: [],
+      allowedDomains: [...(settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS)], deniedDomains: [],
       ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
   };
@@ -78,13 +80,15 @@ function operationFromLine(line: string): string {
 
 function violationFromLine(line: string): SandboxViolation {
   const operation = operationFromLine(line);
-  if (/^(?:network(?:-|$)|http-request$|connect$|outbound$)/i.test(operation)) return { kind: "network", resource: resourceFromLine(line), message: line };
+  if (/^(?:network(?:-|$)|http-request$|connect$|outbound$)/i.test(operation)) return { kind: "network", resource: networkResourceFromLine(line) ?? resourceFromLine(line), message: line };
   if (/^file-read(?:-|$)/i.test(operation)) return { kind: "filesystem.read", resource: resourceFromLine(line), message: line };
   return { kind: "filesystem.write", resource: resourceFromLine(line), message: line };
 }
 
 /** Concrete adapter for @anthropic-ai/sandbox-runtime's per-command telemetry. */
 export class AnthropicSandboxRuntime implements SandboxRuntime {
+  readonly supportsNetworkWidening = process.platform === "darwin";
+  private readonly proxies = new Map<string, CommandNetworkProxy>();
   private readonly strace = new Map<string, StraceViolationObserver>();
   private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {}
 
@@ -104,7 +108,26 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
     const policy = this.settings.writePolicy;
-    const wrapped = await SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, context);
+    const networkGrants = context.extraCapabilities?.filter(capability => capability.kind === "network") ?? [];
+    if (networkGrants.length > 0 && !this.supportsNetworkWidening) throw new Error("Network widening is currently supported only on macOS");
+    const endpoints = networkGrants.map(capability => {
+      const endpoint = canonicalNetworkEndpoint(capability.resource);
+      if (endpoint === undefined || endpoint !== capability.resource) throw new Error("Invalid canonical network grant");
+      return endpoint;
+    });
+    let proxy: CommandNetworkProxy | undefined;
+    if (this.supportsNetworkWidening) {
+      if (this.proxies.has(context.commandId)) throw new Error("Duplicate active sandbox command ID");
+      proxy = await createCommandNetworkProxy(context.commandId, [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints]);
+      this.proxies.set(context.commandId, proxy);
+    }
+    let wrapped: string;
+    try {
+      wrapped = await SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, { ...context, ...(proxy ? { networkProxy: proxy } : {}) });
+    } catch (error) {
+      await this.forgetCommand(context.commandId);
+      throw error;
+    }
     if (this.useStrace) this.strace.set(context.commandId, new StraceViolationObserver(context.cwd ?? this.settings.cwd, { allow: [...policy.allow, ...extraWrites], deny: policy.deny }));
     return wrapped;
   }
@@ -114,7 +137,12 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     return observer ? chunk => observer.ingest(chunk) : undefined;
   }
 
-  forgetCommand(commandId: string): void { this.strace.delete(commandId); }
+  async forgetCommand(commandId: string): Promise<void> {
+    this.strace.delete(commandId);
+    const proxy = this.proxies.get(commandId);
+    this.proxies.delete(commandId);
+    await proxy?.close();
+  }
 
   async getViolationsForCommand(commandId: string): Promise<readonly SandboxViolation[]> {
     const observer = this.strace.get(commandId);
@@ -164,5 +192,5 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
   }
 
-  static async reset(): Promise<void> { await SandboxManager.reset(); }
+  static async reset(): Promise<void> { await closeCommandNetworkProxies(); await SandboxManager.reset(); }
 }
