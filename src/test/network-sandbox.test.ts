@@ -78,7 +78,7 @@ test("network selection cannot forge neighboring endpoints or replace them with 
   assert.deepEqual(collapseWriteScopes([cap, leaf, parent, cap]), [cap, parent]);
 });
 
-test("macOS real Seatbelt retains filesystem isolation during endpoint widening", { skip: process.platform !== "darwin" }, async t => {
+test("macOS strict local policy retains filesystem isolation during endpoint widening", { skip: process.platform !== "darwin" }, async t => {
   const base = await realpath(await mkdtemp(join(tmpdir(), "pi-network-sandbox-")));
   const cwd = join(base, "workspace"), blocked = join(base, "blocked");
   await Promise.all([mkdir(cwd), mkdir(blocked)]);
@@ -91,7 +91,7 @@ test("macOS real Seatbelt retains filesystem isolation during endpoint widening"
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const port = (server.address() as { port: number }).port;
   const resource = `127.0.0.1:${port}`;
-  const runtime = await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: { allow: [cwd], deny: [blocked] }, allowedDomains: [] });
+  const runtime = await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: { allow: [cwd], deny: [blocked] }, allowedDomains: [], allowLocalBinding: false });
   const runSandbox = async (wrapped: string): Promise<CommandResult> => {
     try {
       const output = await exec("/bin/bash", ["-c", wrapped], { cwd, timeout: 10000 });
