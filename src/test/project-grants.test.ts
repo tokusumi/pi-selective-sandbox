@@ -19,7 +19,7 @@ const request = (resource: string): ApprovalRequest => ({
   command: "write " + resource, replayWarning: false, sessionGrantEligible: true, projectGrantEligible: true
 });
 
-test("project identity uses a canonical git worktree root and safe fallback", async () => {
+test("project identity uses a canonical git base directory and safe fallback", async () => {
   const base = await mkdtemp(join(tmpdir(), "pi-project-id-"));
   const repo = join(base, "repo"); const nested = join(repo, "a", "b");
   await mkdir(nested, { recursive: true });

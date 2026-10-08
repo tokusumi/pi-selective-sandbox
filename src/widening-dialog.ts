@@ -1,0 +1,180 @@
+import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, SelectList, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { ancestorPaths } from "./resource-selection.js";
+import type { Capability, EscalationApprovalRequest } from "./types.js";
+
+export type ApprovalDuration = "once" | "session" | "project";
+export const durationLabels = { once: "Once", session: "This session", project: "This project" } satisfies Record<ApprovalDuration, string>;
+export type WideningChoice = { action: "allow"; capabilities: readonly Capability[]; duration: ApprovalDuration } | { action: "host" | "deny" };
+export type WideningDialogOptions = {
+  request: EscalationApprovalRequest;
+  durations(capabilities: readonly Capability[]): ApprovalDuration[];
+  warnings(capabilities: readonly Capability[]): string[];
+  projectId?: string;
+};
+export type EscalationUI = {
+  hasUI?: boolean;
+  mode?: string;
+  signal?: AbortSignal;
+  ui?: Pick<ExtensionUIContext, "select"> & Partial<Pick<ExtensionUIContext, "custom">>;
+  sessionManager?: { getSessionId(): string };
+};
+
+/** Escape terminal controls for presentation only; resource identities are never rewritten. */
+export function displayText(text: string): string {
+  return text.replace(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+export function wideningSummary(options: WideningDialogOptions, selected: readonly Capability[], duration: ApprovalDuration): string {
+  const { request } = options;
+  const targets = request.observedCapabilities ?? request.capabilities;
+  const hasNetwork = selected.some(scope => scope.kind === "network");
+  const hasWrites = selected.some(scope => scope.kind === "filesystem.write");
+  return [
+    hasNetwork ? "Allow resource access in sandbox" : "Allow write access in sandbox",
+    "", "Blocked target", ...targets.map(target => `  ${displayText(target.resource)}`),
+    "", "Allow access to", ...selected.map(scope => hasNetwork ? `  ${scope.kind}: ${displayText(scope.resource)}` : `  ${displayText(scope.resource)}`),
+    ...(hasNetwork ? ["Only the listed exact network endpoints are permitted; other hosts and ports remain blocked."] : []),
+    ...(hasWrites ? [selected.some(scope => scope.kind === "filesystem.write" && scope.resource === "/")
+      ? "WARNING: Allows writes across the entire filesystem. Existing deny rules still apply."
+      : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply."] : []),
+    ...options.warnings(selected), "", `Duration: ${durationLabels[duration]}`,
+    ...(duration === "project" && options.projectId ? [`Project: ${displayText(options.projectId)}`] : []),
+    "", "Command", displayText(request.command),
+    ...(request.commandIdentity ? [`Working directory: ${displayText(request.commandIdentity.cwd)}`] : []),
+    "", "The entire command will run again and may repeat earlier side effects.",
+    "This approval keeps the command inside the sandbox.",
+    "Approving a resource never approves leaving the sandbox. Approving host execution never grants a resource capability."
+  ].join("\n");
+}
+
+/** Single TUI screen. The only editable values are predefined ancestor paths and durations. */
+export function createWideningDialog(options: WideningDialogOptions, theme: Pick<Theme, "fg" | "bold">, refresh: () => void, done: (choice: WideningChoice) => void): Component {
+  const selected = options.request.capabilities.map(capability => ({ ...capability }));
+  let duration: ApprovalDuration = "once";
+  let focus = 0;
+  let completed = false;
+  const finish = (choice: WideningChoice) => { if (!completed) { completed = true; done(choice); } };
+  const listTheme = {
+    selectedPrefix: (text: string) => theme.fg("accent", text), selectedText: (text: string) => theme.fg("accent", text),
+    description: (text: string) => theme.fg("muted", text), scrollInfo: (text: string) => theme.fg("dim", text), noMatch: (text: string) => theme.fg("warning", text)
+  };
+  let durationList: SelectList;
+  const updateDurations = () => {
+    const available = options.durations(selected);
+    if (!available.includes(duration)) duration = "once";
+    durationList = new SelectList(available.map(value => ({ value, label: durationLabels[value] })), 3, listTheme);
+    durationList.setSelectedIndex(available.indexOf(duration));
+    durationList.onSelectionChange = item => { duration = item.value as ApprovalDuration; refresh(); };
+    durationList.onSelect = () => { focus = selected.length + 1; refresh(); };
+  };
+  updateDurations();
+  const scopeLists = selected.map((scope, index) => {
+    const list = new SelectList(ancestorPaths(scope.resource).map((value, depth) => ({ value, label: displayText(value), description: depth === 0 ? "initial scope" : undefined })), 4, listTheme);
+    list.onSelectionChange = item => { selected[index] = { kind: "filesystem.write", resource: item.value }; updateDurations(); refresh(); };
+    list.onSelect = () => { focus = index + 1; refresh(); };
+    return list;
+  });
+  const actions = new SelectList([
+    { value: "allow", label: "Allow and retry" }, { value: "deny", label: "Deny" }, { value: "host", label: "Run outside sandbox…" }
+  ], 3, listTheme);
+  actions.onSelect = item => finish(item.value === "allow" ? { action: "allow", capabilities: selected, duration } : { action: item.value as "host" | "deny" });
+  return {
+    invalidate() { for (const list of [...scopeLists, durationList, actions]) list.invalidate(); },
+    handleInput(data) {
+      if (completed) return;
+      if (matchesKey(data, Key.escape)) { finish({ action: "deny" }); return; }
+      if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
+        focus = (focus + (matchesKey(data, Key.tab) ? 1 : -1) + selected.length + 2) % (selected.length + 2);
+        refresh(); return;
+      }
+      let list = actions;
+      if (focus < selected.length) list = scopeLists[focus];
+      else if (focus === selected.length) list = durationList;
+      list.handleInput(data); refresh();
+    },
+    render(width) {
+      const lines: string[] = [];
+      const w = Math.max(1, width);
+      const add = (text: string, color: "text" | "muted" | "warning" | "accent" = "text") => lines.push(...wrapTextWithAnsi(theme.fg(color, text), w));
+      add(theme.bold("Allow write access in sandbox"), "accent");
+      add("Blocked target", "muted");
+      for (const target of options.request.observedCapabilities ?? options.request.capabilities) add(displayText(target.resource));
+      lines.push("");
+      for (let index = 0; index < selected.length; index++) {
+        add(`${focus === index ? "> " : ""}Allow access to${selected.length > 1 ? ` (${index + 1}/${selected.length})` : ""}`, "accent");
+        if (focus === index) lines.push(...scopeLists[index].render(w));
+        add(`Selected: ${displayText(selected[index].resource)}`);
+      }
+      add(selected.some(scope => scope.resource === "/")
+        ? "WARNING: Allows writes across the entire filesystem. Existing deny rules still apply."
+        : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply.", selected.some(scope => scope.resource === "/") ? "warning" : "muted");
+      for (const warning of options.warnings(selected)) add(warning, "warning");
+      lines.push("");
+      add(`${focus === selected.length ? "> " : ""}Duration`, "accent");
+      if (focus === selected.length) lines.push(...durationList.render(w));
+      else add(durationLabels[duration]);
+      if (duration === "project" && options.projectId) add(`Project: ${displayText(options.projectId)}`, "muted");
+      lines.push("");
+      add("Command", "muted");
+      add(displayText(options.request.command));
+      if (options.request.commandIdentity) add(`Working directory: ${displayText(options.request.commandIdentity.cwd)}`, "muted");
+      add("The entire command will run again and may repeat earlier side effects.", "warning");
+      lines.push("");
+      if (focus === selected.length + 1) lines.push(...actions.render(w));
+      else add("[Allow and retry]   [Deny]   [Run outside sandbox…]", "muted");
+      add("Tab: next field · Shift+Tab: previous · ↑↓: select · Enter: continue/confirm · Esc: deny", "muted");
+      return lines.map(line => truncateToWidth(line, w));
+    }
+  };
+}
+
+export async function showWideningDialog(context: EscalationUI, options: WideningDialogOptions): Promise<WideningChoice> {
+  if (!context.hasUI || !context.ui || context.signal?.aborted) return { action: "deny" };
+  // Endpoint grants have no filesystem ancestors. Keep every resource fixed
+  // for network/mixed requests and select only duration and final action.
+  if (options.request.capabilities.some(capability => capability.kind === "network")) {
+    const selected = options.request.capabilities;
+    const available = options.durations(selected);
+    const chosen = await context.ui.select("Permission duration\n\n" + wideningSummary(options, selected, "once"),
+      available.map(value => durationLabels[value]), { signal: context.signal });
+    const duration = available.find(value => durationLabels[value] === chosen);
+    if (!duration || context.signal?.aborted) return { action: "deny" };
+    const action = await context.ui.select(wideningSummary(options, selected, duration),
+      ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
+    if (context.signal?.aborted) return { action: "deny" };
+    if (action === "Allow and retry") return { action: "allow", capabilities: selected, duration };
+    return { action: action === "Run outside sandbox…" ? "host" : "deny" };
+  }
+  if (context.mode === "tui" && context.ui.custom) {
+    return await context.ui.custom<WideningChoice>((tui, theme, _keys, done) => {
+      let settled = false;
+      const finish = (choice: WideningChoice) => {
+        if (settled) return;
+        settled = true;
+        context.signal?.removeEventListener("abort", abort);
+        done(choice);
+      };
+      const abort = () => finish({ action: "deny" });
+      const component = createWideningDialog(options, theme, () => tui.requestRender(), finish);
+      context.signal?.addEventListener("abort", abort, { once: true });
+      if (context.signal?.aborted) abort();
+      return { ...component, dispose() { context.signal?.removeEventListener("abort", abort); } };
+    }) ?? { action: "deny" };
+  }
+  // RPC cannot render custom terminal components. Preserve the same three decisions with built-in selectors.
+  const selected: Capability[] = [];
+  for (const target of options.request.capabilities) {
+    const candidates = ancestorPaths(target.resource);
+    const choice = await context.ui.select(`Allow write access in sandbox\n\nAllow access to\nInitial scope: ${displayText(target.resource)}`, candidates, { signal: context.signal });
+    if (!choice || !candidates.includes(choice)) return { action: "deny" };
+    selected.push({ kind: "filesystem.write", resource: choice });
+  }
+  const available = options.durations(selected);
+  const chosen = await context.ui.select("Duration", available.map(value => durationLabels[value]), { signal: context.signal });
+  const duration = available.find(value => durationLabels[value] === chosen);
+  if (!duration) return { action: "deny" };
+  const action = await context.ui.select(wideningSummary(options, selected, duration), ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
+  if (action === "Allow and retry") return { action: "allow", capabilities: selected, duration };
+  return { action: action === "Run outside sandbox…" ? "host" : "deny" };
+}

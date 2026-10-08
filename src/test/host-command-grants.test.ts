@@ -37,11 +37,17 @@ test("CommandIdentity matches only exact command, canonical cwd, and execution m
 });
 
 test("host once is not stored, while a session host grant is exact and session-local", async () => {
-  const sessionCapabilities = new SessionGrantStore(); const hosts = new SessionHostCommandGrantStore(); let selected = "Run command on host once";
-  const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async () => selected } }, sessionCapabilities, undefined, hosts);
+  const sessionCapabilities = new SessionGrantStore(); const hosts = new SessionHostCommandGrantStore(); let selected = "Once";
+  const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async (title, choices) => {
+    if (choices.includes(capability.resource)) return capability.resource;
+    if (title === "Duration") return "Once";
+    if (choices.includes("Run outside sandbox…")) return "Run outside sandbox…";
+    if (title === "Run outside sandbox — duration") return selected;
+    return "Run on host";
+  } } }, sessionCapabilities, undefined, hosts);
   assert.equal(await provider.request(escalation(command())), "host-allow-once");
   assert.equal(hosts.covers("A", command()), false);
-  selected = "Run command on host for session";
+  selected = "This session";
   assert.equal(await provider.request(escalation(command())), "host-allow-session");
   assert.equal(hosts.covers("A", command()), true);
   assert.equal(await createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "A" } }, sessionCapabilities, undefined, hosts).request(escalation(command())), "host-allow-session");
@@ -52,7 +58,12 @@ test("host once is not stored, while a session host grant is exact and session-l
 test("project host grant persists by project and stores command identity, not observed resource", async () => {
   const base = await mkdtemp(join(tmpdir(), "pi-host-project-")); const path = join(base, "host-command-grants.json");
   const store = new ProjectHostCommandGrantStore(path); const hostSessions = new SessionHostCommandGrantStore();
-  const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async () => "Run command on host for project" } }, new SessionGrantStore(), { projectId: "/project-a", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(base, "caps.json")), hostGrants: store }, hostSessions);
+  const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async (title, choices) => {
+    if (choices.includes(capability.resource)) return capability.resource;
+    if (title === "Duration") return "Once";
+    if (choices.includes("Run outside sandbox…")) return "Run outside sandbox…";
+    return title === "Run outside sandbox — duration" ? "This project" : "Run on host";
+  } } }, new SessionGrantStore(), { projectId: "/project-a", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(base, "caps.json")), hostGrants: store }, hostSessions);
   assert.equal(await provider.request(escalation(command())), "host-allow-project");
   assert.equal(await new ProjectHostCommandGrantStore(path).covers("/project-a", command()), true);
   const future = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "B" } }, new SessionGrantStore(), { projectId: "/project-a", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(base, "caps.json")), hostGrants: new ProjectHostCommandGrantStore(path) }, new SessionHostCommandGrantStore());
@@ -103,25 +114,36 @@ test("uncanonicalizable cwd offers host once but never reusable host scopes", as
   const choices: string[][] = [];
   const provider = createApprovalProvider({
     hasUI: true, sessionManager: { getSessionId: () => "A" },
-    ui: { select: async (_message, options) => { choices.push(options); return "Deny"; } }
+    ui: { select: async (title, options) => {
+      choices.push(options);
+      if (options.includes(capability.resource)) return capability.resource;
+      if (title === "Duration") return "Once";
+      if (options.includes("Run outside sandbox…")) return "Run outside sandbox…";
+      return "Deny";
+    } }
   }, new SessionGrantStore(), {
     projectId: "/project", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(tmpdir(), "unused-caps.json")),
     hostGrants: new ProjectHostCommandGrantStore(join(tmpdir(), "unused-hosts.json"))
   }, new SessionHostCommandGrantStore());
   await provider.request(escalation(undefined));
-  assert.ok(choices[0].includes("Run command on host once"));
-  assert.ok(!choices[0].includes("Run command on host for session"));
-  assert.ok(!choices[0].includes("Run command on host for project"));
+  assert.deepEqual(choices.at(-1), ["Once"]);
 });
 
 test("a deny-root violation offers host replay only", async () => {
   const seen: { message: string; choices: string[] }[] = [];
   const provider = createApprovalProvider({
     hasUI: true, sessionManager: { getSessionId: () => "A" },
-    ui: { select: async (message, choices) => { seen.push({ message, choices }); return "Run command on host once"; } }
+    ui: { select: async (message, choices) => {
+      seen.push({ message, choices });
+      if (choices.includes("Run outside sandbox…")) return "Run outside sandbox…";
+      if (choices.includes("Once")) return "Once";
+      return "Run on host";
+    } }
   }, new SessionGrantStore(), undefined, new SessionHostCommandGrantStore());
   assert.equal(await provider.request({ ...escalation(command()), capabilities: [] }), "host-allow-once");
-  assert.deepEqual(seen[0].choices, ["Run command on host once", "Run command on host for session", "Deny"]);
+  assert.deepEqual(seen[0].choices, ["Run outside sandbox…", "Deny"]);
   assert.match(seen[0].message, /configured deny root/);
-  assert.ok(!seen[0].choices.some(choice => choice.includes("sandbox")));
+  assert.deepEqual(seen[1].choices, ["Once", "This session"]);
+  assert.deepEqual(seen[2].choices, ["Run on host", "Deny"]);
+  assert.match(seen[2].message, /not a resource permission/);
 });

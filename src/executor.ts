@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { validateWideningSelection } from "./resource-selection.js";
+import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
@@ -37,10 +39,12 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
         const resource = violation.kind === "network" ? canonicalNetworkEndpoint(violation.resource) : undefined;
         return resource ? [{ kind: "network" as const, resource }] : [];
       }) : [];
+      const covered = (candidate: Capability) => granted.some(capability => capability.kind === candidate.kind
+        && (capability.kind === "filesystem.write" ? pathContains(capability.resource, candidate.resource) : capability.resource === candidate.resource));
       const candidates = [...(prepared ?? []), ...networkCandidates];
       const caps = wideningBlocked ? [] : [...new Map(candidates.map(candidate => [`${candidate.kind}\0${candidate.resource}`, candidate])).values()]
-        .filter(candidate => !granted.some(capability => capability.kind === candidate.kind && capability.resource === candidate.resource));
-      const uncovered = observed.filter(violation => !granted.some(capability => capability.kind === violation.kind && capability.resource === violation.resource));
+        .filter(candidate => !covered(candidate));
+      const uncovered = observed.filter(violation => !covered(violation));
       // Covered telemetry cannot make another retry useful. Unsupported
       // network/read denials can still offer exact-command host replay.
       if (!wideningBlocked && caps.length === 0 && (uncovered.length === 0 || uncovered.every(violation => violation.kind === "filesystem.write"))) return this.finish(attempt, "sandbox", observed);
@@ -49,16 +53,20 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (approvalsUsed >= MAX_SANDBOX_APPROVALS) return this.finish(attempt, "sandbox", violations);
       const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
       this.status(`approval-required ${violations[0].kind}`);
-      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
-      if (response === "host-allow-once" || response === "host-allow-session" || response === "host-allow-project") {
+      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: violations, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
+      const decision = typeof response === "string" ? response : response.decision;
+      if (decision === "host-allow-once" || decision === "host-allow-session" || decision === "host-allow-project") {
         this.status("approved host-replay");
         const replay = await runner.runHost(command);
         this.status(`replay exit=${replay.exitCode}`);
         return this.finish(replay, "host", violations);
       }
-      if (response === "deny" || caps.length === 0) { this.status("approval-denied"); return this.finish(attempt, "denied", violations); }
+      const selected = typeof response === "string" ? caps : response.capabilities;
+      if (decision === "deny" || caps.length === 0 || (typeof response !== "string" && !await validateWideningSelection(caps, selected))) {
+        this.status("approval-denied"); return this.finish(attempt, "denied", violations);
+      }
       this.status("approved widen retry");
-      granted.push(...caps);
+      granted.push(...selected);
       priorViolations = violations;
       approvalsUsed++;
       commandId = `${toolCallId}:widened:${approvalsUsed}`;

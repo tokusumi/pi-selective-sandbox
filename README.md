@@ -44,6 +44,16 @@ violation
 
 Stored host-command grants do not bypass sandbox-first execution. The command is still tried in the sandbox first and only replays on host after a sandbox violation.
 
+### Resource approval UI
+
+For a bash filesystem-write violation, the approval screen separates **Blocked target**, **Allow access to**, **Duration**, and **Command**. Select the initial scope or any of its parent directories, then choose `Once`, `This session`, or `This project` when eligible, and confirm with `Allow and retry`. It starts with the initial scope and `Once`. Paths cannot be typed freely; candidates follow the canonical ancestor chain all the way to `/`, without special treatment for HOME.
+
+A directory selection allows writes beneath that directory, including unrelated siblings of the blocked target. Selecting `/` displays an explicit whole-filesystem warning. Existing configured and SDK deny rules still apply, even with a broad scope. Git metadata and directory-entry operations retain their required initial scopes, which can differ from the observed leaf; the screen shows both. Selecting a parent of shared Git metadata remains once-only.
+
+Use `Tab` / `Shift+Tab` to move between fields, arrow keys to select, and `Enter` to continue or confirm. `Esc` denies. The selected path is displayed in full below the candidate list. If several scopes are needed, each has its own ancestor selection. RPC clients use successive scope, duration, and confirmation selectors rather than a custom terminal screen. Headless execution still denies requests that have no eligible stored grant.
+
+`Run outside sandbox…` opens a separate host-duration and exact-command confirmation. It does not approve the selected resource. Both resource retry and host replay rerun the entire command and can repeat earlier side effects. Native `write` / `edit` retain their exact-target preflight approval UI; ancestor selection is for bash sandbox widening.
+
 ## Installation
 
 Install with Pi's normal package installer, then restart Pi:
@@ -71,8 +81,9 @@ Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash
 ### Network permission (macOS)
 
 When a proxy-aware command reaches a blocked destination, the approval prompt
-now offers **Allow resource and rerun command** for an exact `host:port`, with
-once, session, or project scope. The retry stays in the sandbox; filesystem
+shows the exact `host:port`, asks for once, session, or project duration, and
+then offers **Allow and retry**. Endpoints are fixed; unlike filesystem write
+scopes, they cannot be expanded to ancestors. The retry stays in the sandbox; filesystem
 restrictions remain in force. A different port or hostname needs separate
 approval. Unknown socket denials and DNS/private-address protection failures
 cannot be widened by guessing a destination from the shell command.
@@ -192,7 +203,7 @@ fallback.
 
 Sandbox grant identity is capability plus canonical resource. Host grant identity is exact command plus canonical working directory plus execution mode. Reusable grants are partitioned by session ID for session scope and project ID for project scope; once grants are not stored.
 
-Project identity is the canonical Git worktree root, or the canonical startup working directory when there is no Git worktree. It is distinct from the startup working directory used as the default writable root. Moving or cloning a repository does not inherit project grants. See [SPEC.md](SPEC.md) for storage invariants and exact matching rules.
+Project identity is the canonical Git base directory, shared by all linked worktrees: normally the main worktree directory, or the repository metadata directory for bare repositories and `--separate-git-dir` layouts. Outside Git, it is the canonical startup working directory. It is distinct from the startup working directory used as the default writable root. Resource paths and host-command working directories still require exact matches; a host command approved in one worktree is not automatically approved in another cwd. Moving or cloning a repository does not inherit project grants. Existing approvals keyed to a linked worktree are not migrated; approve them again for the shared project if needed. See [SPEC.md](SPEC.md) for storage invariants and exact matching rules.
 
 ## Development
 
