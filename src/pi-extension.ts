@@ -1,4 +1,6 @@
 import { realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { isBroadGitParent, requestEscalationApproval, type ApprovalProject } from "./escalation-approval.js";
 import type { EscalationUI } from "./widening-dialog.js";
 import { dirname, join } from "node:path";
@@ -7,9 +9,11 @@ import { redact_text } from "@spences10/pi-redact";
 import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
-import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
+import { DEFAULT_CONFIG, DEFAULT_WRITE_PROFILES, loadConfig, type ConfigLoadResult } from "./config.js";
 import { resolveNetworkDomains } from "./network-policy.js";
-import { resolveWritePolicy } from "./filesystem-policy.js";
+import { canonicalPath, resolveWritePolicy, type WritePolicy } from "./filesystem-policy.js";
+import { bridgeApprovalContext } from "./subagent-approval.js";
+import { createSubagentSupport, type RequiredChildApi } from "./subagent-support.js";
 import { gitApprovalPaths, pathContains, resolveGitWritePaths, worktreeRemovalParent, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
@@ -70,6 +74,7 @@ export function createApprovalProvider(
 ): ApprovalProvider {
   return {
     async request(request) {
+      if (context.signal?.aborted) return "deny";
       if (request.kind === "escalation") return requestEscalationApproval(context, request, grants, project, hostGrants, gitWritePaths);
       // Native tools retain exact, preflight resource approvals (no host execution).
       const broadParent = isBroadGitParent(request.capabilities, gitWritePaths);
@@ -84,7 +89,8 @@ export function createApprovalProvider(
         ? "\n\nSandbox project approval remembers exactly:\n" + requested + "\n\nfor local project:\n" + project.projectId + "\nincluding future Pi sessions."
         : sessionId ? "\n\nSandbox session approval remembers exactly the capability/resource above for the current Pi session." : "";
       const choice = await context.ui.select("Permission required before this file mutation:\n\n" + request.command
-        + "\n\nRequested capability:\n" + requested + "\n\nNo mutation has occurred yet." + scope, choices);
+        + "\n\nRequested capability:\n" + requested + "\n\nNo mutation has occurred yet." + scope, choices, { signal: context.signal });
+      if (context.signal?.aborted) return "deny";
       if (choice === "Allow for project" && projectEligible) {
         try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; } catch { return "deny"; }
       }
@@ -95,8 +101,10 @@ export function createApprovalProvider(
 }
 
 /** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
-export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promise<void> {
-  const cwd = process.cwd();
+export default async function selectiveSandboxExtension(pi: ExtensionAPI, options: { loadSubagentApi?: () => Promise<RequiredChildApi | undefined> } = {}): Promise<void> {
+  let cwd = process.cwd();
+  const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi });
+  const commandNamespace = randomUUID();
   let enabled = true;
   let monitorDisabled = false;
   const monitorDisabledMessage = "Selective sandbox is disabled for bash, write, and edit because macOS SDK log monitoring is disabled (enableLogMonitor=false). Bash runs on the host; native mutation approvals are bypassed. Enable SDK log monitoring and reload to restore enforcement.";
@@ -126,26 +134,54 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   });
   const grants = new SessionGrantStore();
   const hostGrants = new SessionHostCommandGrantStore();
-  const projectId = await resolveProjectIdentity(cwd);
-  const projectGrants = projectId ? new ProjectGrantStore(join(getAgentDir(), "pi-selective-sandbox", "project-grants.json")) : undefined;
-  const projectHostGrants = projectId ? new ProjectHostCommandGrantStore(join(getAgentDir(), "pi-selective-sandbox", "host-command-grants.json")) : undefined;
-  if (projectGrants) await projectGrants.load();
-  if (projectHostGrants) await projectHostGrants.load();
-  const project = projectId && projectGrants && projectHostGrants ? { projectId, grants: projectGrants, hostGrants: projectHostGrants } : undefined;
-  const loadedConfig = await loadConfig(join(getAgentDir(), "pi-selective-sandbox", "config.json"));
-  const writePolicy = loadedConfig.valid
-    ? await resolveWritePolicy({ cwd, config: loadedConfig.config, env: process.env })
-    : await resolveWritePolicy({
-        cwd,
-        config: { filesystem: { extraWritableRoots: [], disabledDefaultProfiles: [...DEFAULT_WRITE_PROFILES] } },
-        env: process.env
-      });
-  const gitWritePaths = await resolveGitWritePaths(cwd, writePolicy);
+  let project: ApprovalProject | undefined;
+  let loadedConfig: ConfigLoadResult = { valid: true, config: DEFAULT_CONFIG };
+  let writePolicy: WritePolicy = { allow: [], deny: [] };
+  let gitWritePaths: GitWritePaths | undefined;
+  let protectedRoot: string;
+  let setup: Promise<void> | undefined;
+  const ensureSetup = async (context?: unknown) => {
+    if (subagents.bindingFailed) throw new Error("Child sandbox binding failed; execution is blocked.");
+    setup ??= (async () => {
+      const ctx = context as { cwd?: string } | undefined;
+      cwd = ctx?.cwd ?? process.cwd();
+      loadedConfig = subagents.binding?.config ?? await loadConfig(join(getAgentDir(), "pi-selective-sandbox", "config.json"));
+      protectedRoot = await canonicalPath(subagents.binding?.protectedRoot ?? join(getAgentDir(), "pi-selective-sandbox", "approvals"));
+      const resolved = await resolveWritePolicy({ cwd, config: loadedConfig.valid ? loadedConfig.config : {
+        filesystem: { extraWritableRoots: [], disabledDefaultProfiles: [...DEFAULT_WRITE_PROFILES] }
+      }, env: process.env });
+      // Transport files and generated trusted extension code must remain
+      // unwritable even after the user widens an ancestor (including /).
+      writePolicy = { allow: resolved.allow, deny: [...resolved.deny, protectedRoot] };
+      gitWritePaths = await resolveGitWritePaths(cwd, writePolicy);
+      const projectId = await resolveProjectIdentity(cwd);
+      if (projectId) {
+        const projectGrants = new ProjectGrantStore(join(getAgentDir(), "pi-selective-sandbox", "project-grants.json"));
+        const projectHostGrants = new ProjectHostCommandGrantStore(join(getAgentDir(), "pi-selective-sandbox", "host-command-grants.json"));
+        await projectGrants.load();
+        await projectHostGrants.load();
+        project = { projectId, grants: projectGrants, hostGrants: projectHostGrants };
+      }
+    })();
+    await setup;
+  };
+  const approvalContext = (context: ApprovalUI & { cwd?: string }) => subagents.binding && !context.hasUI
+    ? bridgeApprovalContext(context, subagents.binding.bridge) : context;
+  pi.on("session_start", async (_event, context) => {
+    await ensureSetup(context);
+    await subagents.start(context, loadedConfig, protectedRoot);
+  });
+  pi.on("tool_call", event => {
+    const safeActions = new Set(["list", "status", "guide", "models", "cost", "doctor", "stop", "interrupt", "steer", "debug.run"]);
+    if (event.toolName === "subagent" && subagents.unavailable && !safeActions.has(String(event.input?.action ?? ""))) {
+      return { block: true, reason: "Subagent sandbox integration is unavailable; no child was launched." };
+    }
+  });
   let runtime: AnthropicSandboxRuntime | undefined;
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy, allowedDomains: loadedConfig.valid
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy, commandNamespace, allowedDomains: loadedConfig.valid
       ? resolveNetworkDomains(loadedConfig.config.network)
       : [] }).then(value => {
       runtime = value;
@@ -158,6 +194,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     }
   };
   const isEnabled = async (context?: unknown) => {
+    await ensureSetup(context);
     if (!enabled) return false;
     if (process.platform === "darwin") await ensureRuntime();
     if (monitorDisabled && enabled) {
@@ -166,7 +203,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
     }
     return enabled;
   };
-  pi.on("session_shutdown", async () => { await AnthropicSandboxRuntime.reset().catch(() => undefined); });
+  pi.on("session_shutdown", async () => {
+    try { await subagents.close(); } finally { await runtime?.dispose(); }
+  });
   const localOperations = createLocalBashOperations();
   const localBash = createBashTool(cwd, {
     operations: { exec: (command, commandCwd, options) => runCommand(localOperations, command, commandCwd, options) }
@@ -174,7 +213,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   pi.registerTool({
     ...localBash,
     async execute(id, params, signal, onUpdate, context) {
-      if (!await isEnabled(context)) return redactToolResult(await localBash.execute(id, params, signal, onUpdate));
+      await ensureSetup(context);
+      if (!await isEnabled(context)) {
+        const hostBash = createBashTool(cwd, { operations: { exec: (command, commandCwd, opts) => runCommand(localOperations, command, commandCwd, opts) } });
+        return redactToolResult(await hostBash.execute(id, params, signal, onUpdate));
+      }
       await ensureRuntime();
       const sandboxedBash = createBashTool(cwd, {
         operations: {
@@ -191,7 +234,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),
-              approvals: createApprovalProvider({ ...context, signal: options.signal }, grants, project, hostGrants, gitWritePaths),
+              approvals: createApprovalProvider(approvalContext({ ...context, signal: options.signal }), grants, project, hostGrants, gitWritePaths),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
               getSandboxCapabilities: async () => { const sessionId = context.sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
@@ -241,8 +284,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
       return redactToolResult(output);
     }
   });
-  const approvalProvider = (context: unknown) => createApprovalProvider(context as ApprovalUI, grants, project, hostGrants, gitWritePaths);
-  const mutationOptions = { cwd, writePolicy, approvals: approvalProvider, isEnabled };
+  const approvalProvider = (context: unknown, signal?: AbortSignal) => createApprovalProvider(approvalContext({ ...context as ApprovalUI & { cwd?: string }, signal }), grants, project, hostGrants, gitWritePaths);
+  const mutationOptions = { cwd, writePolicy: () => writePolicy, approvals: approvalProvider, isEnabled };
   pi.registerTool(await createBoundaryAwareWriteTool(mutationOptions) as never);
   pi.registerTool(await createBoundaryAwareEditTool(mutationOptions) as never);
 }

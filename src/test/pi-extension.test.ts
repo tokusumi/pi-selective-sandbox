@@ -19,7 +19,7 @@ test("Pi entrypoint registers a replacement bash tool", async () => {
     registerTool: (value: { name: string }) => { tools.push(value); }
   } as never);
   assert.deepEqual(tools.map(tool => tool.name), ["bash", "write", "edit"]);
-  assert.deepEqual(events, ["session_shutdown"]);
+  assert.deepEqual(events, ["session_start", "tool_call", "session_shutdown"]);
   assert.deepEqual(commands, ["selective-sandbox"]);
 });
 

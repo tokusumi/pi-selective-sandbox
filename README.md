@@ -64,7 +64,7 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 ## Behavior
 
-The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the extension startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
+The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the session startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
 When that startup directory is writable and belongs to a Git repository, a blocked Git metadata write offers the shared Git directory and, only if it is outside the shared directory, the worktree's Git directory. Git writes can span the index, objects, refs, reflogs, tags, and worktree records; this approval lets a multi-step operation retry without reaching a second Git metadata denial after it has already changed repository state. The shared directory grant can affect other worktrees and Git configuration or hooks, so the approval prompt names that scope. Configured deny paths still apply, and this access does not change the native `write` or `edit` boundaries.
 
@@ -95,6 +95,38 @@ children's access. This permits proxy-aware HTTP/HTTPS and TCP clients, not raw
 TCP/UDP or unrestricted networking. Network isolation and network permissions
 are macOS-only features. Linux network isolation is not a supported guarantee;
 Linux filesystem sandboxing remains separate.
+
+### Native Pi subagents
+
+With `pi-subagents`' public required-child-extension API (tested with 0.76.1),
+local native Pi children load this extension in both foreground and background
+execution, including `extensions: []` overrides. No pi-subagents patch is needed.
+External CLI/job runners and remote machine placements are outside this integration.
+
+Children inherit a snapshot of the parent's filesystem and network configuration.
+Each child's workspace default and relative native-tool paths use its own session
+cwd; relative extra writable roots retain their parent-startup meaning. macOS
+network isolation and exact endpoint approvals work the same way as in the parent.
+Neither parent's nor sibling's session grants are implicitly copied to a child.
+
+A headless child's selectors are forwarded to the owning parent's UI, showing the
+child session and cwd. They use sequential scope/duration/confirmation selectors,
+not the custom single-screen TUI. Grants are validated and stored in the child:
+Once remains operation-local, Session belongs to that child, and Project keeps
+its normal project identity. Host replay still needs its separate exact-command
+confirmation. Concurrent approval dialogs are serialized.
+
+Parent absence, shutdown, cancellation, invalid replies, or a five-minute selector
+timeout deny access. Standalone headless sessions still deny without a stored
+grant. Failed parent setup blocks new `subagent` launches rather than silently
+launching unprotected children (status/stop controls remain available). Invalid
+child bindings block bash/write/edit instead of falling back to global defaults. Reload after installing/upgrading pi-subagents.
+
+Private bridge files and generated child bindings live under
+`<Pi agent directory>/pi-selective-sandbox/approvals/`. While enforcement is on,
+this root is denied to bash/write/edit even after widening `/`. Child shutdown
+releases only its own runtime; it does not reset a sibling's shared SDK monitor.
+`/selective-sandbox off` remains local to the session where it was invoked.
 
 ### Filesystem and network configuration
 

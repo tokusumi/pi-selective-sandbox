@@ -39,7 +39,7 @@ failures do not by themselves trigger automatic off.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,
   canonical filesystem boundary before invoking the native tool.
 - The resolved default write policy permits the extension startup working
-  directory, `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
+  directory (the session cwd, not a shared host process cwd), `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
   Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
   `credentials.toml`, and `env` are denied. Deny rules take precedence.
 - For bash, when the startup working directory is writable under that policy,
@@ -141,7 +141,8 @@ Only final `Allow and retry` confirmation grants access. Eligible durations are
 durations. Tab/Shift+Tab change fields, arrows select, Enter continues or
 confirms, and Escape denies. Cancellation or an aborted tool must not create a
 new approval. RPC uses built-in sequential scope, duration, and confirmation
-selectors; print/JSON modes must not acquire authority by lack of UI.
+selectors; standalone print/JSON modes must not acquire authority by lack of UI.
+A native child may use the explicitly registered parent approval bridge in section 18.
 
 Before persistence and retry, selected scopes must be write capabilities from
 the initial scopes' ancestor chains, cover every required scope, and retain
@@ -440,3 +441,43 @@ These allowances never authorize host execution. Network widening is for clients
 using the sandbox HTTP/CONNECT or authenticated SOCKS proxy, not direct TCP/UDP.
 The SDK sets NO_PROXY for loopback/private networks; clients targeting an explicitly
 allowed local endpoint must opt into the proxy (for example, curl `--noproxy ''`).
+
+## 18. Local native Pi subagents
+
+The integration uses `pi-subagents/required-child-extensions` (tested with
+pi-subagents 0.76.1), not private launcher changes. The owning UI session registers
+this extension plus a generated, session-scoped companion binding as required
+extensions. These survive native foreground/background, nested and retained
+launches and explicit empty extension lists. External CLI/job runners and remote
+placements are not covered. An unavailable/failed parent integration blocks new
+model-issued `subagent` launches; safe status/stop controls remain available. An
+invalid child binding blocks execution instead of loading unrelated global
+defaults. This is not a sandbox against trusted host extensions invoking other
+launch APIs directly.
+
+Each child receives a snapshot of the parent's valid configuration, or the same
+invalid-config fail-closed state. Relative extra writable roots are canonicalized
+at the parent's startup cwd. The workspace profile and native relative paths use
+the child's session cwd. Network defaults, disabled profiles, additions and macOS
+per-invocation endpoint isolation are inherited; Linux's existing unsupported
+network contract is unchanged. Enforcement starts enabled independently in each
+child. The parent's in-memory off switch and session grants are not copied.
+
+Only selector requests are forwarded to the exact registered parent. The parent
+UI displays child session ID/cwd and uses sequential built-in selectors. Resource
+and host choices, canonical validation, persistence, project identity and session
+grant ownership remain in the requesting child. Approving one child creates no
+parent/sibling session authority. Concurrent selectors are serialized; cancellation
+or expiry of one must not block subsequent children. Missing/closed parents,
+malformed replies, interrupted requests and five-minute selector deadlines deny.
+No model/supervisor reply is treated as human approval.
+
+The private transport root under the Pi agent directory is an explicit write deny
+for every execution surface while enforcement is enabled, including widened root
+scopes. It contains owner-only bounded files, correlated request identities and
+per-parent nonces; symlink queue files are not followed. This is local trusted
+extension coordination, not credential secrecy from other same-user processes.
+The parent disposes its registration and bridge on shutdown/reload. Runtime SDK
+ownership is process-wide across extension module reloads. A session closes its
+own command proxies and only the last runtime owner resets the SDK; command IDs
+are namespaced so foreground siblings cannot cross-attribute violations.
