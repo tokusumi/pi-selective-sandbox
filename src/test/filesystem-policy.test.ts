@@ -88,3 +88,12 @@ test("disabling every profile yields a restrictive policy for invalid-config fal
   assert.deepEqual(policy.allow, []);
   assert.deepEqual(policy.deny, [join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
 });
+
+
+test("network configuration accepts scoped domains but rejects malformed or broad allowances", () => {
+  assert.deepEqual(Reflect.get(parseConfig({ network: { extraAllowedDomains: ["registry.npmjs.org:443", "*.example.com"] } }), "network"),
+    { extraAllowedDomains: ["registry.npmjs.org:443", "*.example.com"] });
+  for (const domain of ["*", "*.com", "https://example.com", "example.com/path", "example.com:0", "example.com:65536", "example.com:443\n", "evil.com\0.example.com"]) {
+    assert.throws(() => parseConfig({ network: { extraAllowedDomains: [domain] } }));
+  }
+});

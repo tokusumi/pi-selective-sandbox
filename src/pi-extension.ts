@@ -8,6 +8,7 @@ import { create_skills_manager } from "@spences10/pi-skills";
 import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_WRITE_PROFILES, loadConfig } from "./config.js";
+import { resolveNetworkDomains } from "./network-policy.js";
 import { resolveWritePolicy } from "./filesystem-policy.js";
 import { gitApprovalPaths, pathContains, resolveGitWritePaths, worktreeRemovalParent, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
@@ -144,7 +145,9 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy }).then(value => {
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy, allowedDomains: loadedConfig.valid
+      ? resolveNetworkDomains(loadedConfig.config.network)
+      : [] }).then(value => {
       runtime = value;
       monitorDisabled = process.platform === "darwin" && value.logMonitorEnabled === false;
     });
@@ -191,7 +194,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
               approvals: createApprovalProvider({ ...context, signal: options.signal }, grants, project, hostGrants, gitWritePaths),
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
-              getSandboxCapabilities: async () => { const sessionId = context.sessionManager.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
+              getSandboxCapabilities: async () => { const sessionId = context.sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
               canonicalizeCapabilities: async capabilities => {
                 const boundary = await MutationBoundary.create(commandCwd, writePolicy);
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));

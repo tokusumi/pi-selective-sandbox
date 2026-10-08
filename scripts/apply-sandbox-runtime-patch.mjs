@@ -10,6 +10,14 @@ const patch = join(root, "patches", "sandbox-runtime-0.0.76.patch");
 // Exact input/output hashes reject version drift, partial patches, and local
 // modifications rather than silently installing incomplete telemetry repairs.
 const files = {
+  "sandbox-manager.js": [
+    "9eef40ef0700f36a57fa55f253dd48cb2fccadbe8ac4caca5aac47a2e4c686a5",
+    "11ad733b7676c751085e7408f60092d213598586d13fcb4c0d2996276a6389c4"
+  ],
+  "sandbox-manager.d.ts": [
+    "c118b0fc98694cee5f33d8136c177153d28f8436c96c349a5a5e00c1129237fa",
+    "d15eca99eaf26157f8759a3d1604b086819688e25fe5e3ae2479c80d199b0289"
+  ],
   "macos-sandbox-utils.js": [
     "5e7672b216ac850e28c9ea90688d705a068ad6f8d1f2ece7e8399c7db92319dd",
     "7d36d8254d378bdccdd91c66aee9ea41d987672c3903c2679cd3ad22223bdc7d"

@@ -209,9 +209,29 @@ capability kind + canonical resource
 
 Reusable grants are partitioned by session ID for session scope and project identity
 for project scope. Current capability kinds
-include filesystem read, filesystem write, and network; current UI widening is
-limited to reported filesystem-write candidates. The grant is consumed only as
-extra sandbox capability configuration.
+include filesystem read, filesystem write, and network. UI widening supports
+reported filesystem-write candidates and, on macOS, proxy-observed network
+allowlist denials with a canonical exact `host:port` resource (bracketed IPv6).
+Network grants do not imply other ports, subdomains, URLs, filesystem access,
+or host replay. Raw Seatbelt socket/IP denials, malformed endpoints, and
+resolved-address protection failures do not offer network widening. Network
+isolation, allowlist permissions, and network widening are macOS-only features.
+Linux does not consume or offer network capability grants; no Linux network
+isolation guarantee is part of the supported contract. The grant is consumed
+only as extra sandbox capability configuration.
+
+Every macOS sandbox attempt uses an authenticated, per-invocation HTTP/SOCKS
+proxy with immutable startup allowances plus that attempt's approved endpoints.
+Seatbelt permits only that proxy's loopback port, not direct destination access.
+Neither global SDK config updates nor client-supplied attribution IDs authorize
+network access. Concurrent attempts cannot inherit each other's approvals. The
+proxy and open connections are closed after the attempt (including failure,
+cancellation, wrapping failure, and before approval); a once grant is absent on
+the next operation. Background descendants lose this proxy when the attempt
+finishes. SDK resolved-address guards remain enforced: a hostname approval does
+not bypass DNS-rebinding/private-address protection. The proxies preserve SDK
+upstream proxy resolution (explicit SDK configuration, otherwise HTTP_PROXY /
+HTTPS_PROXY and NO_PROXY), with the destination allowlist checked before routing.
 
 ## 8. HostCommandGrant
 
@@ -268,20 +288,20 @@ to the base identity; approve them again for the shared project if needed.
 
 ### Platform capabilities
 
-| Platform | Filesystem | Network namespace | Unix sockets | Fail closed |
+| Platform | Filesystem | Network isolation | Unix sockets | Fail closed |
 | --- | --- | --- | --- | --- |
 | macOS | Isolated | Isolated | Isolated | Yes |
-| Other Linux | Isolated | Isolated | Isolated | Yes |
-| Ubuntu | Isolated | Isolated | Unrestricted | Yes |
+| Other Linux | Isolated | Not supported | Isolated | Yes |
+| Ubuntu | Isolated | Not supported | Unrestricted | Yes |
 
 Ubuntu is detected from `ID=ubuntu` in `/etc/os-release`, regardless of version,
 and uses `network.allowAllUnixSockets: true`. The tested Ubuntu 24.04 host's
 AppArmor policy allows the outer Bubblewrap sandbox while blocking the nested
 user namespace used by the runtime's seccomp-based Unix-socket isolation.
-This execution mode does not change filesystem permissions, network-namespace
-isolation, violation handling, sandbox widening, or the approval model. It is
-not host replay;
-filesystem and network sandboxing continue inside Bubblewrap.
+This execution mode does not change filesystem permissions, violation handling,
+filesystem sandbox widening, or the approval model. It is not host replay;
+filesystem sandboxing continues inside Bubblewrap. Network isolation is supported
+only on macOS, not Linux.
 
 Because `allowAllUnixSockets` skips upstream seccomp observation, Ubuntu
 uses `strace` around Bubblewrap for filesystem telemetry. The tracer's stderr
@@ -372,7 +392,7 @@ not weaken or choose the security boundary.
 - It does not implement command-prefix or executable-name allowlists for host
   execution.
 
-## 17. Filesystem configuration
+## 17. Filesystem and network configuration
 
 The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json`:
 
@@ -381,13 +401,47 @@ The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json
   "filesystem": {
     "extraWritableRoots": ["~/.cache/uv"],
     "disabledDefaultProfiles": ["cargo-cache"]
+  },
+  "network": {
+    "extraAllowedDomains": ["packages.example.com:443"],
+    "disabledDefaultProfiles": []
   }
 }
 ```
 
-The built-in profiles are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. Extra writable
+The built-in filesystem profiles are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. Extra writable
 roots widen only the sandbox filesystem policy. They never grant host replay.
 A missing configuration file uses defaults. An existing malformed file,
 invalid field, or unknown disabled profile is reported diagnostically and
-produces a deny-by-default caller write policy. Replacement tools are still
-registered, so invalid configuration cannot restore Pi's unsandboxed tools.
+produces a deny-by-default caller write policy and an empty network allowlist.
+Replacement tools are still registered, so invalid configuration cannot restore
+Pi's unsandboxed tools.
+
+Network defaults apply to macOS network isolation and have four profiles:
+
+| Profile | Allowed patterns |
+| --- | --- |
+| `git` | `api.github.com`, `github.com`, `*.github.com`, `gitlab.com:443`, `bitbucket.org:443`, `raw.githubusercontent.com:443`, `objects.githubusercontent.com:443`, `release-assets.githubusercontent.com:443` |
+| `node` | `registry.npmjs.org:443`, `registry.yarnpkg.com:443`, `nodejs.org:443`, `get.pnpm.io:443` |
+| `rust` | `crates.io:443`, `index.crates.io:443`, `static.crates.io:443`, `static.rust-lang.org:443`, `sh.rustup.rs:443` |
+| `python` | `pypi.org:443`, `files.pythonhosted.org:443`, `python.org:443`, `www.python.org:443`, `astral.sh:443` |
+
+All four profiles are enabled unless named in `network.disabledDefaultProfiles`.
+Filesystem and network profile disable lists are independent. Unknown names or
+invalid fields fail closed. Disabling all four yields no default network
+allowances; explicit additions and capability grants may still authorize their
+resources. Disabling a profile removes baseline allowances, not a deny rule.
+Profiles authorize destinations for all sandboxed commands, not executable-name
+matches. They cover common package/toolchain routes, not arbitrary mirrors or
+shared redirect CDNs. New defaults are HTTPS/443-only; the pre-existing GitHub
+patterns retain their original all-port semantics.
+
+Optional `network.extraAllowedDomains` adds to the enabled defaults. The resolved
+list is deduplicated. Patterns use the SDK's domain/IP syntax: an exact host or `*.example.com`,
+optionally with a port in 1–65535; IPv6 literals must be bracketed. No port means
+all TCP ports for that host. URLs, paths, control characters, bare `*`, and overly
+broad wildcard suffixes are rejected. Patterns are canonicalized and deduplicated.
+These allowances never authorize host execution. Network widening is for clients
+using the sandbox HTTP/CONNECT or authenticated SOCKS proxy, not direct TCP/UDP.
+The SDK sets NO_PROXY for loopback/private networks; clients targeting an explicitly
+allowed local endpoint must opt into the proxy (for example, curl `--noproxy ''`).
