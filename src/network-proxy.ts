@@ -12,10 +12,10 @@ export type CommandNetworkProxy = { port: number; token: string; close(): Promis
 const active = new Set<CommandNetworkProxy>();
 
 /** Immutable per-attempt rules, independent of client-supplied attribution IDs. */
-export async function createCommandNetworkProxy(commandId: string, allowedDomains: readonly string[]): Promise<CommandNetworkProxy> {
+export async function createCommandNetworkProxy(commandId: string, allowedDomains: readonly string[], manager = SandboxManager): Promise<CommandNetworkProxy> {
   const token = randomBytes(32).toString("hex");
   const encodedCommand = Buffer.from(commandId).toString("base64");
-  const record = (host: string, port: number, reason: string) => SandboxManager.getSandboxViolationStore().addViolation({
+  const record = (host: string, port: number, reason: string) => manager.getSandboxViolationStore().addViolation({
     line: `deny network-outbound ${host}:${port} (${reason})`, encodedCommand, timestamp: new Date()
   });
   const filter = (port: number, host: string) => {
@@ -33,7 +33,7 @@ export async function createCommandNetworkProxy(commandId: string, allowedDomain
   });
   // Match the SDK's explicit config / HTTP(S)_PROXY / NO_PROXY resolution.
   // The destination allowlist still runs before any upstream tunnel is opened.
-  const parentProxy = resolveParentProxy(SandboxManager.getConfig()?.network.parentProxy);
+  const parentProxy = resolveParentProxy(manager.getConfig()?.network.parentProxy);
   const httpServer = createHttpProxyServer({ filter, lookupFor, parentProxy, proxyAuthToken: token });
   const socks = createSocksProxyServer({ filter, lookupFor, parentProxy, proxyAuthToken: token });
   const mux = createMuxProxyServer({ httpServer, handleSocksConnection: socket => socks.handleConnection(socket) });

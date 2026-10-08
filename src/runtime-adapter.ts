@@ -8,7 +8,21 @@ import type { SandboxRuntime, SandboxViolation } from "./types.js";
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
-export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; allowLocalBinding?: boolean };
+export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string; allowLocalBinding?: boolean };
+
+// Foreground children share a process. Jiti reloads may instantiate another
+// copy of this module, so both SDK ownership and leases must be process-wide.
+type SharedRuntime = { manager: typeof SandboxManager; instances: Set<AnthropicSandboxRuntime> };
+function sharedRuntime(): SharedRuntime {
+  const key = Symbol.for("pi-selective-sandbox.runtime.v1");
+  const root = globalThis as typeof globalThis & { [key: symbol]: SharedRuntime | undefined };
+  let shared = root[key];
+  if (!shared) {
+    shared = { manager: SandboxManager, instances: new Set() };
+    root[key] = shared;
+  }
+  return shared;
+}
 
 /** Carries the configured flag even when initialization fails; not process health. */
 export class SandboxInitializationFailure extends Error {
@@ -93,6 +107,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   readonly supportsNetworkWidening = process.platform === "darwin";
   private readonly proxies = new Map<string, CommandNetworkProxy>();
   private readonly strace = new Map<string, StraceViolationObserver>();
+  private disposed = false;
+  private commandKey(id: string): string { return this.settings.commandNamespace ? `${this.settings.commandNamespace}:${id}` : id; }
   private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {}
 
   static async initialize(settings: SandboxSettings, enableLogMonitor = process.platform === "darwin"): Promise<AnthropicSandboxRuntime> {
@@ -103,12 +119,16 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     }
     // Linux's startup-policy observer cannot account for per-command grants.
     enableLogMonitor = process.platform === "darwin" && enableLogMonitor;
-    try { await SandboxManager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, enableLogMonitor); }
-    catch (cause) { throw new SandboxInitializationFailure(cause, enableLogMonitor); }
-    return new AnthropicSandboxRuntime(settings, ubuntu, enableLogMonitor);
+    const instance = new AnthropicSandboxRuntime(settings, ubuntu, enableLogMonitor);
+    const shared = sharedRuntime();
+    shared.instances.add(instance);
+    try { await shared.manager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, enableLogMonitor); }
+    catch (cause) { shared.instances.delete(instance); throw new SandboxInitializationFailure(cause, enableLogMonitor); }
+    return instance;
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
+    if (this.disposed) throw new Error("Sandbox runtime has been disposed");
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
     const policy = this.settings.writePolicy;
     const networkGrants = context.extraCapabilities?.filter(capability => capability.kind === "network") ?? [];
@@ -121,12 +141,20 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     let proxy: CommandNetworkProxy | undefined;
     if (this.supportsNetworkWidening) {
       if (this.proxies.has(context.commandId)) throw new Error("Duplicate active sandbox command ID");
-      proxy = await createCommandNetworkProxy(context.commandId, [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints]);
+      proxy = await createCommandNetworkProxy(this.commandKey(context.commandId), [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], sharedRuntime().manager);
       this.proxies.set(context.commandId, proxy);
     }
     let wrapped: string;
     try {
-      wrapped = await SandboxManager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, { ...context, ...(proxy ? { networkProxy: proxy } : {}) });
+      wrapped = await sharedRuntime().manager.wrapWithSandbox(command, undefined, {
+        filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] },
+        // A foreground sibling may have initialized the shared SDK with a
+        // different policy. Preserve this session's strict opt-out per attempt.
+        ...(process.platform === "darwin" ? { network: {
+          allowedDomains: [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], deniedDomains: [],
+          allowLocalBinding: this.settings.allowLocalBinding ?? true
+        } } : {})
+      }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {
       await this.forgetCommand(context.commandId);
       throw error;
@@ -150,8 +178,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   async getViolationsForCommand(commandId: string): Promise<readonly SandboxViolation[]> {
     const observer = this.strace.get(commandId);
     this.strace.delete(commandId);
-    const store = SandboxManager.getSandboxViolationStore();
-    const read = (): SandboxViolation[] => store.getViolationsForCommand(commandId).flatMap(event => {
+    const store = sharedRuntime().manager.getSandboxViolationStore();
+    const read = (): SandboxViolation[] => store.getViolationsForCommand(this.commandKey(commandId)).flatMap(event => {
       // Seatbelt also reports sysctl/Mach noise, which is not a supported
       // filesystem or network capability and must not become "unknown" writes.
       if (process.platform === "darwin" && !/^(?:file-(?:read|write)(?:-|$)|network(?:-|$)|http-request$)/i.test(operationFromLine(event.line))) return [];
@@ -195,5 +223,22 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
   }
 
-  static async reset(): Promise<void> { await closeCommandNetworkProxies(); await SandboxManager.reset(); }
+  /** Release only this session's proxies; keep siblings' SDK monitoring alive. */
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    await Promise.all([...this.proxies.keys()].map(id => this.forgetCommand(id)));
+    this.strace.clear();
+    const shared = sharedRuntime();
+    shared.instances.delete(this);
+    if (shared.instances.size === 0) await shared.manager.reset();
+  }
+
+  static async reset(): Promise<void> {
+    const shared = sharedRuntime();
+    for (const instance of shared.instances) { instance.disposed = true; instance.strace.clear(); }
+    shared.instances.clear();
+    await closeCommandNetworkProxies();
+    await shared.manager.reset();
+  }
 }
