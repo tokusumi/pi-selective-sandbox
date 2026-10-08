@@ -46,7 +46,7 @@ test("required child extensions carry parent-specific routing and filesystem/net
   } });
   await writeFile(join(base, "agent", "pi-selective-sandbox", "config.json"), JSON.stringify({
     filesystem: { extraWritableRoots: ["relative-extra"], disabledDefaultProfiles: ["cargo-cache"] },
-    network: { extraAllowedDomains: ["configured.example:8443"], disabledDefaultProfiles: ["git", "node", "rust", "python"] }
+    network: { extraAllowedDomains: ["configured.example:8443"], disabledDefaultProfiles: ["git", "node", "rust", "python"], allowLocalBinding: false }
   }));
   await selectiveSandboxExtension(parent as never, { loadSubagentApi: loadApi });
   const titles: string[] = [];
@@ -82,6 +82,7 @@ test("required child extensions carry parent-specific routing and filesystem/net
   assert.match(JSON.stringify(result.content), /child-approved/);
   assert.equal(settings?.cwd, join(base, "child"));
   assert.deepEqual(settings?.allowedDomains, ["configured.example:8443"]);
+  assert.equal(settings?.allowLocalBinding, false, "the child must inherit the parent's strict local-listener opt-out");
   assert.ok(settings?.writePolicy.allow.includes(join(base, "parent", "relative-extra")));
   assert.ok(settings?.writePolicy.allow.includes(join(base, "child")));
   assert.ok(!settings?.writePolicy.allow.includes(join(base, "parent")));
@@ -103,6 +104,7 @@ test("required child extensions carry parent-specific routing and filesystem/net
   await earlyCompanionChild.handlers.get("session_start")!({}, context);
   await earlyCompanionChild.tools.get("bash")!.execute("early-binding", { command: "probe" }, signal, () => {}, context as never);
   assert.deepEqual(settings?.allowedDomains, ["configured.example:8443"], "companion-first loading must inherit the parent's restrictive network snapshot");
+  assert.equal(settings?.allowLocalBinding, false, "later global defaults must not reopen child loopback access");
   assert.ok(settings?.writePolicy.allow.includes(join(base, "parent", "relative-extra")));
   await earlyCompanionChild.handlers.get("session_shutdown")!({}, context);
   await parent.handlers.get("session_shutdown")!({}, {});

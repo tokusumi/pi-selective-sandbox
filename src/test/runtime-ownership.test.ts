@@ -32,3 +32,25 @@ test("disposing one foreground child preserves sibling SDK state and violation a
   await parent.dispose();
   assert.equal(reset.mock.callCount(), 1);
 });
+
+test("foreground runtimes pass their own local-binding policy on every invocation", async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
+  t.after(() => Object.defineProperty(process, "platform", platform));
+  t.mock.method(SandboxManager, "initialize", async () => {});
+  t.mock.method(SandboxManager, "reset", async () => {});
+  const policies: (boolean | undefined)[] = [];
+  t.mock.method(SandboxManager, "wrapWithSandbox", async (command: string, _shell: unknown, config: { network?: { allowLocalBinding?: boolean } }) => {
+    policies.push(config.network?.allowLocalBinding);
+    return command;
+  });
+  const parent = await AnthropicSandboxRuntime.initialize({ cwd: "/parent", writePolicy: { allow: ["/parent"], deny: [] }, allowLocalBinding: true });
+  const child = await AnthropicSandboxRuntime.initialize({ cwd: "/child", writePolicy: { allow: ["/child"], deny: [] }, allowLocalBinding: false });
+  t.after(async () => { await child.dispose(); await parent.dispose(); });
+  // This SDK-argument test does not start real proxies. OS-level proxy/listener
+  // coverage lives in the network-sandbox and loopback-sandbox suites.
+  for (const runtime of [parent, child]) Object.defineProperty(runtime, "supportsNetworkWidening", { value: false });
+  await parent.wrap("probe", { commandId: "parent", commandText: "probe" });
+  await child.wrap("probe", { commandId: "child", commandText: "probe" });
+  assert.deepEqual(policies, [true, false], "the shared SDK startup policy must not override a strict child");
+});

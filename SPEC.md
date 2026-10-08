@@ -224,16 +224,52 @@ only as extra sandbox capability configuration.
 
 Every macOS sandbox attempt uses an authenticated, per-invocation HTTP/SOCKS
 proxy with immutable startup allowances plus that attempt's approved endpoints.
-Seatbelt permits only that proxy's loopback port, not direct destination access.
+Seatbelt permits that proxy's loopback port. With `network.allowLocalBinding`
+(default `true` on macOS), it also permits direct loopback networking and
+all-interface listeners, independently of the proxy allowlist. With the option
+`false`, local TCP is proxy-only; direct destination access is not permitted.
 Neither global SDK config updates nor client-supplied attribution IDs authorize
-network access. Concurrent attempts cannot inherit each other's approvals. The
+proxy access. Concurrent attempts cannot inherit each other's proxy approvals. The
 proxy and open connections are closed after the attempt (including failure,
 cancellation, wrapping failure, and before approval); a once grant is absent on
 the next operation. Background descendants lose this proxy when the attempt
-finishes. SDK resolved-address guards remain enforced: a hostname approval does
+finishes; startup local-network permissions are not revoked by proxy teardown.
+SDK resolved-address guards remain enforced on proxy traffic: a hostname approval does
 not bypass DNS-rebinding/private-address protection. The proxies preserve SDK
 upstream proxy resolution (explicit SDK configuration, otherwise HTTP_PROXY /
 HTTPS_PROXY and NO_PROXY), with the destination allowlist checked before routing.
+
+### Local listeners and loopback (macOS)
+
+The default enables SDK `network.allowLocalBinding` so test/dev listeners and
+clients can use TCP/UDP on arbitrary local ports, including ephemeral port `0`,
+without capability grants. There is no listener port allowlist or per-port approval flow:
+ports are transient runtime details, not a useful test-server permission identity.
+This permission is independent of Git/Node/Rust/Python destination profiles.
+An empty proxy allowlist does not turn off local networking.
+
+The pinned SDK's rules allow bind/inbound on `(local ip "*:*")` and outbound
+on `(remote ip "localhost:*")`. This is **not** a loopback-only listener guarantee:
+wildcard and non-loopback-interface listeners can be reachable from the LAN.
+Even Seatbelt's local `localhost` filter admits unspecified-address binds.
+Programs should bind explicitly to `127.0.0.1` or `::1`. Native IPv4 and IPv6
+loopback work; IPv4-mapped IPv6 loopback connects are not covered by Seatbelt's
+remote filter (the SDK forces Java's IPv4 stack).
+
+Direct loopback also reaches pre-existing host services, across all ports,
+without consulting the proxy or grants. The extension cannot distinguish a
+command's own listener from another local service. Local services/relays can
+confer authority beyond the external allowlist, so this default trusts localhost;
+it is not host-service isolation. Users requiring that boundary must set
+`network.allowLocalBinding: false`, which restores proxy-only local TCP.
+Raw socket denials in that mode do not become guessed listener-port approvals;
+existing exact-endpoint proxy grants and exact-command host replay remain separate.
+
+This permission does not enable direct external egress, grant filesystem access,
+authorize host replay, or allow Unix sockets. macOS Unix-socket isolation remains
+unchanged. Linux ignores the local-binding option: network isolation is unsupported,
+and Ubuntu's separate `allowAllUnixSockets` behavior remains unchanged. Invalid
+configuration disables local binding as well as clearing the proxy allowlist.
 
 ## 8. HostCommandGrant
 
@@ -292,7 +328,7 @@ to the base identity; approve them again for the shared project if needed.
 
 | Platform | Filesystem | Network isolation | Unix sockets | Fail closed |
 | --- | --- | --- | --- | --- |
-| macOS | Isolated | Isolated | Isolated | Yes |
+| macOS | Isolated | External egress isolated; local networking allowed by default | Isolated | Yes |
 | Other Linux | Isolated | Not supported | Isolated | Yes |
 | Ubuntu | Isolated | Not supported | Unrestricted | Yes |
 
@@ -406,7 +442,8 @@ The configuration path is `<Pi agent directory>/pi-selective-sandbox/config.json
   },
   "network": {
     "extraAllowedDomains": ["packages.example.com:443"],
-    "disabledDefaultProfiles": []
+    "disabledDefaultProfiles": [],
+    "allowLocalBinding": true
   }
 }
 ```
@@ -415,7 +452,8 @@ The built-in filesystem profiles are `workspace`, `tmp`, `cargo-cache`, and `run
 roots widen only the sandbox filesystem policy. They never grant host replay.
 A missing configuration file uses defaults. An existing malformed file,
 invalid field, or unknown disabled profile is reported diagnostically and
-produces a deny-by-default caller write policy and an empty network allowlist.
+produces a deny-by-default caller write policy, an empty proxy network allowlist,
+and disabled local binding.
 Replacement tools are still registered, so invalid configuration cannot restore
 Pi's unsandboxed tools.
 
@@ -430,9 +468,10 @@ Network defaults apply to macOS network isolation and have four profiles:
 
 All four profiles are enabled unless named in `network.disabledDefaultProfiles`.
 Filesystem and network profile disable lists are independent. Unknown names or
-invalid fields fail closed. Disabling all four yields no default network
-allowances; explicit additions and capability grants may still authorize their
-resources. Disabling a profile removes baseline allowances, not a deny rule.
+invalid fields fail closed. Disabling all four yields no default proxy network
+allowances; local binding is controlled independently by `network.allowLocalBinding`
+(a boolean, default `true` on macOS). Explicit additions and capability grants
+may still authorize their resources. Disabling a profile removes baseline allowances, not a deny rule.
 Profiles authorize destinations for all sandboxed commands, not executable-name
 matches. They cover common package/toolchain routes, not arbitrary mirrors or
 shared redirect CDNs. New defaults are HTTPS/443-only; the pre-existing GitHub
@@ -444,9 +483,11 @@ optionally with a port in 1–65535; IPv6 literals must be bracketed. No port me
 all TCP ports for that host. URLs, paths, control characters, bare `*`, and overly
 broad wildcard suffixes are rejected. Patterns are canonicalized and deduplicated.
 These allowances never authorize host execution. Network widening is for clients
-using the sandbox HTTP/CONNECT or authenticated SOCKS proxy, not direct TCP/UDP.
+using the sandbox HTTP/CONNECT or authenticated SOCKS proxy, not direct external
+TCP/UDP. Default direct loopback permission is separate and bypasses this allowlist.
 The SDK sets NO_PROXY for loopback/private networks; clients targeting an explicitly
-allowed local endpoint must opt into the proxy (for example, curl `--noproxy ''`).
+allowed private endpoint (or loopback with local binding disabled) must opt into
+the proxy (for example, curl `--noproxy ''`).
 
 ## 18. Local native Pi subagents
 
@@ -464,9 +505,11 @@ launch APIs directly.
 Each child receives a snapshot of the parent's valid configuration, or the same
 invalid-config fail-closed state. Relative extra writable roots are canonicalized
 at the parent's startup cwd. The workspace profile and native relative paths use
-the child's session cwd. Network defaults, disabled profiles, additions and macOS
-per-invocation endpoint isolation are inherited; Linux's existing unsupported
-network contract is unchanged. Enforcement starts enabled independently in each
+the child's session cwd. Network defaults, disabled profiles, additions, local
+binding preference and macOS per-invocation endpoint isolation are inherited.
+The local binding preference is applied on each macOS invocation, so a shared
+SDK's startup setting cannot reopen access for a strict child. Linux's existing
+unsupported network contract is unchanged. Enforcement starts enabled independently in each
 child. The parent's in-memory off switch and session grants are not copied.
 
 Only selector requests are forwarded to the exact registered parent. The parent

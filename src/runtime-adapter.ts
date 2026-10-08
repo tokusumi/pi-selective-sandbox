@@ -8,7 +8,7 @@ import type { SandboxRuntime, SandboxViolation } from "./types.js";
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
-export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string };
+export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string; allowLocalBinding?: boolean };
 
 // Foreground children share a process. Jiti reloads may instantiate another
 // copy of this module, so both SDK ownership and leases must be process-wide.
@@ -57,6 +57,9 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
     network: {
       // GitHub CLI remains usable with its normal credential helpers.
       allowedDomains: [...(settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS)], deniedDomains: [],
+      // SDK semantics: all-interface listeners + direct loopback connections,
+      // not just binding to 127.0.0.1. External egress still requires the proxy.
+      ...(process.platform === "darwin" ? { allowLocalBinding: settings.allowLocalBinding ?? true } : {}),
       ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
   };
@@ -143,7 +146,15 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     }
     let wrapped: string;
     try {
-      wrapped = await sharedRuntime().manager.wrapWithSandbox(command, undefined, { filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] } }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
+      wrapped = await sharedRuntime().manager.wrapWithSandbox(command, undefined, {
+        filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] },
+        // A foreground sibling may have initialized the shared SDK with a
+        // different policy. Preserve this session's strict opt-out per attempt.
+        ...(process.platform === "darwin" ? { network: {
+          allowedDomains: [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], deniedDomains: [],
+          allowLocalBinding: this.settings.allowLocalBinding ?? true
+        } } : {})
+      }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {
       await this.forgetCommand(context.commandId);
       throw error;

@@ -80,6 +80,24 @@ Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash
 
 ### Network permission (macOS)
 
+Local test servers work without port approvals by default. The extension enables
+the SDK's `allowLocalBinding`: listeners may use any local port (including port
+`0` for an ephemeral port), and commands may use TCP/UDP directly on IPv4/IPv6
+loopback. This also permits access to **existing host localhost services**, not
+just listeners created by that command. Such services can relay traffic beyond
+the external allowlist; localhost is a trusted boundary in this mode.
+
+**This is not loopback-only listener isolation.** The SDK permits bind/inbound
+on all interfaces, so bind test/dev servers explicitly to `127.0.0.1` or `::1`
+to avoid LAN exposure. IPv4-mapped IPv6 loopback connects are not matched by
+Seatbelt; the SDK forces Java's IPv4 stack, but other clients may need native
+IPv4 or IPv6 loopback sockets. Unix sockets remain restricted on macOS.
+
+Set `network.allowLocalBinding` to `false` to restore the proxy-only local TCP
+policy. This is independent of destination profiles; disabling all four profiles
+does not disable local networking. There is no listener port allowlist or per-port
+approval flow. This option does not change Linux behavior.
+
 When a proxy-aware command reaches a blocked destination, the approval prompt
 shows the exact `host:port`, asks for once, session, or project duration, and
 then offers **Allow and retry**. Endpoints are fixed; unlike filesystem write
@@ -91,9 +109,10 @@ cannot be widened by guessing a destination from the shell command.
 Each macOS attempt has its own authenticated HTTP/SOCKS proxy. Approvals do not
 leak into concurrent commands or change the SDK's global allowlist. The proxy
 closes when the attempt ends, including open connections and background
-children's access. This permits proxy-aware HTTP/HTTPS and TCP clients, not raw
-TCP/UDP or unrestricted networking. Network isolation and network permissions
-are macOS-only features. Linux network isolation is not a supported guarantee;
+children's proxy access. This permits proxy-aware HTTP/HTTPS and TCP clients,
+not direct external TCP/UDP or unrestricted networking. Default local networking
+is a separate startup permission and is not revoked when an attempt's proxy
+closes. Network isolation and network permissions are macOS-only features. Linux network isolation is not a supported guarantee;
 Linux filesystem sandboxing remains separate.
 
 ### Native Pi subagents
@@ -130,7 +149,7 @@ releases only its own runtime; it does not reset a sibling's shared SDK monitor.
 
 ### Filesystem and network configuration
 
-Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. A missing file uses defaults. An existing malformed file, invalid field, or unknown profile name emits a diagnostic and installs a deny-by-default write policy and empty network allowlist while still replacing all three tools. Extra roots remain inside the sandbox and do not authorize host replay.
+Optional user-local configuration is read at startup from `<Pi agent directory>/pi-selective-sandbox/config.json`. A missing file uses defaults. An existing malformed file, invalid field, or unknown profile name emits a diagnostic and installs a deny-by-default write policy and empty network allowlist with local binding disabled while still replacing all three tools. Extra roots remain inside the sandbox and do not authorize host replay.
 
 ```json
 {
@@ -140,7 +159,8 @@ Optional user-local configuration is read at startup from `<Pi agent directory>/
   },
   "network": {
     "extraAllowedDomains": ["packages.example.com:443"],
-    "disabledDefaultProfiles": []
+    "disabledDefaultProfiles": [],
+    "allowLocalBinding": true
   }
 }
 ```
@@ -161,7 +181,8 @@ package installs and toolchain downloads, not every mirror, redirect CDN, or
 self-hosted registry.
 
 Set `network.disabledDefaultProfiles` to, for example, `["node", "python"]`
-to remove those defaults, or all four names to start with an empty allowlist.
+to remove those destinations, or all four names to start with an empty proxy
+allowlist. Set `allowLocalBinding: false` as well for proxy-only networking.
 Disabling a profile removes its baseline allowances; it is not a hard deny of
 explicit additions or later approvals. Filesystem profiles are independent.
 
@@ -170,10 +191,12 @@ Entries are deduplicated. Use hostnames or IP literals, optionally `:port`;
 bracket IPv6 (for example, `[::1]:8080`). Without a port, all TCP ports for that
 host are permitted. `*.example.com` permits strict subdomains, not the apex.
 URLs, paths, bare `*`, and broad wildcards such as `*.com` are rejected. These
-settings grant no host replay. For explicitly allowed local/private destinations,
-override the SDK's NO_PROXY in the client (for example, curl `--noproxy ''`) so
-the connection goes through the sandbox proxy. Per-attempt proxies also inherit
-the SDK's upstream HTTP_PROXY / HTTPS_PROXY / NO_PROXY routing.
+settings grant no host replay. For explicitly allowed private destinations
+(and loopback with `allowLocalBinding: false`), override the SDK's NO_PROXY in the client (for
+example, curl `--noproxy ''`) so the connection goes through the sandbox proxy.
+With local binding enabled, direct loopback does not consult this allowlist.
+Per-attempt proxies also inherit the SDK's upstream HTTP_PROXY / HTTPS_PROXY /
+NO_PROXY routing.
 
 Paths beginning with `~/` are expanded, relative paths are resolved against the startup working directory, and paths are canonicalized. Available default profile names are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. The last profile mirrors the sandbox runtime's implicit `~/.npm/_logs` and `~/.claude/debug` allowances for native tools; disabling it adds explicit runtime denies. For example, set `disabledDefaultProfiles` to `["cargo-cache"]` to remove Cargo's default writable cache profile.
 
@@ -183,7 +206,7 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 
 | Platform | Filesystem | Network | Unix sockets |
 | --- | --- | --- | --- |
-| macOS | Isolated | Isolated | Isolated |
+| macOS | Isolated | External egress isolated; local networking allowed by default | Isolated |
 | Other Linux | Isolated | Not supported | Isolated |
 | Ubuntu | Isolated | Not supported | Unrestricted |
 
