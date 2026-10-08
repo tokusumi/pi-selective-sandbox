@@ -130,19 +130,25 @@ blocked targets from the initial capability scopes (including prepared Git and
 directory-entry scopes), the selected write scopes, duration, and command.
 The initial selection is each prepared scope and `Once`. The user can choose
 that scope or any canonical ancestor up to `/`; there is no HOME-specific limit
-and no free-form path input. Each scope gets its own selection when several are
-required. The full selected path remains visible even when a candidate row is
-truncated. Directory choices explain that descendants are writable, and `/`
-requires a visible whole-filesystem warning. Existing configured and SDK deny
+and no free-form path input. Each uncovered scope gets its own selection when
+several are required. Selecting a parent skips subsequent targets beneath it,
+even before final confirmation; narrowing that selection restores any targets
+no longer covered. Skipped targets remain disclosed in the blocked-target list.
+The full selected path remains available even when a candidate row is truncated.
+Directory choices explain that descendants are writable, and `/` requires a
+visible whole-filesystem warning. Existing configured and SDK deny
 rules remain in force. Parents of shared Git metadata retain once-only scope.
 
 Only final `Allow and retry` confirmation grants access. Eligible durations are
 `Once`, `This session`, and `This project`; selecting a scope can remove reusable
-durations. Tab/Shift+Tab change fields, arrows select, Enter continues or
-confirms, and Escape denies. Cancellation or an aborted tool must not create a
-new approval. RPC uses built-in sequential scope, duration, and confirmation
-selectors; standalone print/JSON modes must not acquire authority by lack of UI.
-A native child may use the explicitly registered parent approval bridge in section 18.
+durations. Tab/Shift+Tab change uncovered fields, arrows select, Enter continues
+or confirms, and Escape denies. The TUI uses a terminal-height-bounded viewport;
+PageUp/PageDown scroll details without changing selections. Field navigation and
+terminal resizing bring the focused control into view. Cancellation or an aborted
+tool must not create a new approval. RPC uses built-in sequential scope, duration,
+and confirmation selectors; standalone print/JSON modes must not acquire authority
+by lack of UI. A native child may use the explicitly registered parent approval
+bridge in section 18.
 
 Before persistence and retry, selected scopes must be write capabilities from
 the initial scopes' ancestor chains, cover every required scope, and retain
