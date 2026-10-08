@@ -197,16 +197,117 @@ test("an already aborted approval does not open UI or create a grant", async () 
   assert.deepEqual(grants.capabilities("A"), []);
 });
 
-test("multiple blocked targets retain separate selections and collapse only explicitly selected ancestors", async () => {
+test("selecting a parent skips covered later targets before final confirmation", async () => {
   const { parent, target } = await paths();
   const other = join(parent, "other", "output");
-  const answers = [parent, parent, "This session", "Allow and retry"];
+  const answers = [parent, "This session", "Allow and retry"];
   const grants = new SessionGrantStore();
   const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async () => answers.shift() } }, grants);
   assert.deepEqual(await provider.request({ ...request(target), capabilities: [write(target), write(other)] }), {
     decision: "sandbox-allow-session", capabilities: [write(parent)]
   });
   assert.deepEqual(grants.capabilities("A"), [write(parent)]);
+});
+
+test("RPC still asks for a sibling outside the selected parent", async () => {
+  const { parent, target } = await paths();
+  const sibling = `${parent}-sibling/output`;
+  const answers = [parent, sibling, "Once", "Allow and retry"];
+  const seen: string[] = [];
+  const provider = createApprovalProvider({ hasUI: true, ui: { select: async title => { seen.push(title); return answers.shift(); } } }, new SessionGrantStore());
+  assert.deepEqual(await provider.request({ ...request(target), capabilities: [write(target), write(join(parent, "other")), write(sibling)] }), {
+    decision: "sandbox-allow-once", capabilities: [write(parent), write(sibling)]
+  });
+  assert.equal(seen.length, 4);
+  assert.match(seen[3], /other/); // skipped targets remain in the final disclosure
+});
+
+test("TUI skips covered fields, restores them on narrowing, and still requires confirmation", () => {
+  const options = dialogOptions("/aaa/bbb/ccc");
+  options.request.capabilities = [write("/aaa/bbb/ccc"), write("/aaa/bbb/ddd"), write("/aaa/bbb/eee")];
+  const results: WideningChoice[] = [];
+  const dialog = createWideningDialog(options, plainTheme, () => {}, choice => results.push(choice));
+  dialog.handleInput?.("\x1b[B"); // select /aaa/bbb
+  dialog.handleInput?.("\r"); // skip remaining paths -> duration
+  assert.match(dialog.render(100).join("\n"), /> Duration/);
+  assert.doesNotMatch(dialog.render(100).join("\n"), /Selected: \/aaa\/bbb\/(ddd|eee)/);
+  dialog.handleInput?.("\x1b[Z"); // Shift+Tab -> parent field
+  dialog.handleInput?.("\x1b[A"); // narrow to original
+  dialog.handleInput?.("\r");
+  assert.match(dialog.render(100).join("\n"), /> Allow access to \(2\/3\)/);
+  dialog.handleInput?.("\x1b[Z");
+  dialog.handleInput?.("\x1b[B"); // widen again
+  dialog.handleInput?.("\r");
+  dialog.handleInput?.("\r"); // duration -> actions
+  assert.deepEqual(results, []);
+  dialog.handleInput?.("\r");
+  assert.deepEqual(results, [{ action: "allow", capabilities: [write("/aaa/bbb")], duration: "once" }]);
+});
+
+test("TUI does not hide a similarly named sibling, and reverse Tab skips covered fields", () => {
+  const options = dialogOptions("/aaa/bbb/ccc");
+  options.request.capabilities = [write("/aaa/bbb/ccc"), write("/aaa/bbb/ddd"), write("/aaa/bbb-other/eee")];
+  const dialog = createWideningDialog(options, plainTheme, () => {}, () => {});
+  dialog.handleInput?.("\x1b[B");
+  dialog.handleInput?.("\r");
+  assert.match(dialog.render(100).join("\n"), /> Allow access to \(2\/2\)/);
+  assert.match(dialog.render(100).join("\n"), /Selected: \/aaa\/bbb-other\/eee/);
+  dialog.handleInput?.("\r");
+  dialog.handleInput?.("\x1b[Z");
+  assert.match(dialog.render(100).join("\n"), /> Allow access to \(2\/2\)/);
+  dialog.handleInput?.("\x1b[Z");
+  assert.match(dialog.render(100).join("\n"), /> Allow access to \(1\/2\)/);
+});
+
+test("a root choice keeps its filesystem warning visible in a bounded approval", () => {
+  const options = dialogOptions("/outside/dir-0/output");
+  options.request.capabilities = Array.from({ length: 50 }, (_, index) => write(`/outside/dir-${index}/output`));
+  const dialog = createWideningDialog(options, plainTheme, () => {}, () => {}, () => 20);
+  dialog.render(80);
+  for (let index = 0; index < 3; index++) { dialog.handleInput?.("\x1b[B"); dialog.render(80); }
+  assert.match(dialog.render(80).join("\n"), /entire filesystem/);
+});
+
+test("TUI bounds long approvals, scrolls without changing grants, and follows focus after resize", async () => {
+  const capabilities = Array.from({ length: 50 }, (_, index) => write(`/outside/dir-${index}/長い名前/output`));
+  let rows = 24;
+  const provider = createApprovalProvider({ mode: "tui", hasUI: true, ui: {
+    select: async () => { throw new Error("Unexpected selector"); },
+    custom: async factory => new Promise(resolve => {
+      const dialog = factory({ terminal: { get rows() { return rows; } }, requestRender() {} } as any, plainTheme as any, {} as any, resolve);
+      assert.ok(!(dialog instanceof Promise));
+      if (dialog instanceof Promise) return;
+      const render = (width = 80) => {
+        const lines = dialog.render(width);
+        assert.ok(lines.length <= rows - 4, `rendered ${lines.length} lines in ${rows} rows`);
+        assert.ok(lines.every(line => visibleWidth(line) <= width));
+        return lines.join("\n");
+      };
+      const initial = render();
+      assert.match(initial, /> Allow access to \(1\/50\)/);
+      for (let index = 0; index < 20; index++) dialog.handleInput?.("\x1b[5~"); // inspect blocked targets at the top
+      assert.match(render(), /Blocked target/);
+      dialog.handleInput?.("\x1b[6~"); // PageDown: scroll, not select
+      assert.notEqual(render(), initial);
+      dialog.handleInput?.("\r"); // follow next field, independent of manual scroll
+      assert.match(render(), /> Allow access to \(2\/50\)/);
+      for (let index = 2; index < 50; index++) dialog.handleInput?.("\r");
+      assert.match(render(), /> Allow access to \(50\/50\)/);
+      dialog.handleInput?.("\r");
+      assert.match(render(), /> Duration/);
+      dialog.handleInput?.("\r");
+      assert.match(render(), /Allow and retry/);
+      rows = 12;
+      dialog.invalidate();
+      assert.match(render(40), /Allow and retry/);
+      for (const width of [1, 12, 80]) render(width);
+      rows = 30;
+      dialog.invalidate();
+      assert.match(render(), /Allow and retry/);
+      dialog.handleInput?.("\x1b");
+    })
+  } }, new SessionGrantStore());
+  assert.equal(await provider.request({ ...request(capabilities[0].resource), capabilities }), "deny");
 });
 
 test("observed Git leaf stays visible separately from the prepared metadata scope", async () => {
