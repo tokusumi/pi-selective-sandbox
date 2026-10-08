@@ -216,6 +216,32 @@ test("Ubuntu release detection accepts all versions and excludes other distribut
   assert.equal(isUbuntuRelease('ID=linuxmint\nID_LIKE="ubuntu debian"\n'), false);
 });
 
+test("macOS defaults allow local TCP without changing destinations, filesystem, or Unix sockets", async t => {
+  await macOSFixture(t);
+  const settings = { cwd: "/project", allowedDomains: [], writePolicy: { allow: ["/project"], deny: ["/project/secret"] } };
+  const defaults = buildSandboxRuntimeConfig(settings);
+  const strict = buildSandboxRuntimeConfig({ ...settings, allowLocalBinding: false });
+  assert.equal(defaults.network.allowLocalBinding, true);
+  assert.equal(strict.network.allowLocalBinding, false);
+  assert.deepEqual(defaults.network.allowedDomains, []);
+  assert.equal(defaults.network.allowAllUnixSockets, undefined);
+  assert.equal(defaults.network.allowUnixSockets, undefined);
+  assert.deepEqual(defaults.filesystem, strict.filesystem);
+  assert.deepEqual(defaults.network, { ...strict.network, allowLocalBinding: true });
+});
+
+test("Linux does not opt into the macOS local binding policy", t => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  t.after(() => Object.defineProperty(process, "platform", platform));
+  const settings = { cwd: "/project", writePolicy: { allow: ["/project"], deny: [] }, allowLocalBinding: true };
+  for (const ubuntu of [false, true]) {
+    const config = buildSandboxRuntimeConfig(settings, ubuntu);
+    assert.equal(config.network.allowLocalBinding, undefined);
+    assert.equal(config.network.allowAllUnixSockets, ubuntu ? true : undefined);
+  }
+});
+
 test("normal platforms retain Unix-socket isolation", () => {
   const config = buildSandboxRuntimeConfig({ cwd: "/project", writePolicy: { allow: ["/project"], deny: [] } });
   assert.equal(config.network.allowAllUnixSockets, undefined);

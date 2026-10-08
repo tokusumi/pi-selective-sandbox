@@ -145,9 +145,10 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI): Promi
   let sandboxUnavailableMessage: string | undefined;
   let initialization: Promise<void> | undefined;
   const ensureRuntime = async () => {
-    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy, allowedDomains: loadedConfig.valid
-      ? resolveNetworkDomains(loadedConfig.config.network)
-      : [] }).then(value => {
+    initialization ??= AnthropicSandboxRuntime.initialize({ cwd, writePolicy,
+      allowLocalBinding: loadedConfig.valid && (loadedConfig.config.network?.allowLocalBinding ?? true),
+      allowedDomains: loadedConfig.valid ? resolveNetworkDomains(loadedConfig.config.network) : []
+    }).then(value => {
       runtime = value;
       monitorDisabled = process.platform === "darwin" && value.logMonitorEnabled === false;
     });

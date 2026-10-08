@@ -8,7 +8,7 @@ import type { SandboxRuntime, SandboxViolation } from "./types.js";
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
-export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[] };
+export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; allowLocalBinding?: boolean };
 
 /** Carries the configured flag even when initialization fails; not process health. */
 export class SandboxInitializationFailure extends Error {
@@ -43,6 +43,9 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
     network: {
       // GitHub CLI remains usable with its normal credential helpers.
       allowedDomains: [...(settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS)], deniedDomains: [],
+      // SDK semantics: all-interface listeners + direct loopback connections,
+      // not just binding to 127.0.0.1. External egress still requires the proxy.
+      ...(process.platform === "darwin" ? { allowLocalBinding: settings.allowLocalBinding ?? true } : {}),
       ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
   };

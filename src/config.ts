@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { DEFAULT_NETWORK_PROFILES, normalizeNetworkPattern } from "./network-policy.js";
 
 export type SelectiveSandboxConfig = {
-  network?: { extraAllowedDomains: string[]; disabledDefaultProfiles?: string[] };
+  network?: { extraAllowedDomains: string[]; disabledDefaultProfiles?: string[]; allowLocalBinding?: boolean };
   filesystem: {
     extraWritableRoots: string[];
     disabledDefaultProfiles: string[];
@@ -45,8 +45,11 @@ export function parseConfig(value: unknown): SelectiveSandboxConfig {
   if (unknown) throw new Error(`unknown default write profile: ${unknown}`);
   const network = (value as { network?: unknown }).network;
   if (network !== undefined && (typeof network !== "object" || network === null || Array.isArray(network))) throw new Error("network must be an object");
-  const networkFields = (network ?? {}) as { extraAllowedDomains?: unknown; disabledDefaultProfiles?: unknown };
-  rejectUnknownFields(networkFields as Record<string, unknown>, ["extraAllowedDomains", "disabledDefaultProfiles"], "network");
+  const networkFields = (network ?? {}) as { extraAllowedDomains?: unknown; disabledDefaultProfiles?: unknown; allowLocalBinding?: unknown };
+  rejectUnknownFields(networkFields as Record<string, unknown>, ["extraAllowedDomains", "disabledDefaultProfiles", "allowLocalBinding"], "network");
+  if (networkFields.allowLocalBinding !== undefined && typeof networkFields.allowLocalBinding !== "boolean") {
+    throw new Error("network.allowLocalBinding must be a boolean");
+  }
   const disabledNetworkProfiles = stringArray(networkFields.disabledDefaultProfiles, "network.disabledDefaultProfiles");
   const knownNetworkProfiles: readonly string[] = DEFAULT_NETWORK_PROFILES;
   const unknownNetworkProfile = disabledNetworkProfiles.find(profile => !knownNetworkProfiles.includes(profile));
@@ -59,6 +62,7 @@ export function parseConfig(value: unknown): SelectiveSandboxConfig {
   if (network !== undefined) {
     parsed.network = { extraAllowedDomains };
     if (networkFields.disabledDefaultProfiles !== undefined) parsed.network.disabledDefaultProfiles = disabledNetworkProfiles;
+    if (networkFields.allowLocalBinding !== undefined) parsed.network.allowLocalBinding = networkFields.allowLocalBinding as boolean;
   }
   return parsed;
 }
@@ -69,7 +73,7 @@ export async function loadConfig(path: string, diagnostic: (message: string) => 
     return { valid: true, config: parseConfig(JSON.parse(await readFile(path, "utf8"))) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { valid: true, config: DEFAULT_CONFIG };
-    diagnostic(`Invalid pi-selective-sandbox config at ${path}; using a deny-by-default write policy and empty network allowlist: ${error instanceof Error ? error.message : String(error)}`);
+    diagnostic(`Invalid pi-selective-sandbox config at ${path}; using a deny-by-default write policy, empty network allowlist, and disabled local binding: ${error instanceof Error ? error.message : String(error)}`);
     return { valid: false };
   }
 }
