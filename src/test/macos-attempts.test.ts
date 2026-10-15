@@ -30,7 +30,10 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
       return { exitCode: failed.code, stdout: failed.stdout, stderr: failed.stderr };
     }
   };
-  const command = `/usr/bin/python3 -c ${quote(`import os\nfor p in ${JSON.stringify(resources)}:\n    fd = os.open(p, os.O_RDWR)\n    os.close(fd)\nprint('opened-all')`)}`;
+  // /usr/bin/python3 is an Xcode shim on hosted macOS runners. Its first
+  // invocation can write unrelated NSIRD_xcodebuild temporary files. Use only
+  // shell builtins so each attempt's first denied operation is a fixture file.
+  const command = `for target in ${resources.map(quote).join(" ")}; do : >> "$target" || exit $?; done; printf 'opened-all\\n'`;
   for (const [index, id] of [longId, `subagent:reviewer:${longId}`].entries()) {
     const runtime = await AnthropicSandboxRuntime.initialize({ cwd, commandNamespace: `12345678-1234-1234-1234-123456789ab${index}`, writePolicy: { allow: [cwd], deny: [] }, allowedDomains: [] });
     let attempts = 0, rounds = 0;
