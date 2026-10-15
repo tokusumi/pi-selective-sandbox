@@ -29,6 +29,10 @@ const files = {
   "sandbox-violation-store.js": [
     "e7524fb72e0d483ebc572bb3e37d1baf472db59714c3f3935824e9d3b82b2142",
     "67716e596b38bb7d00435d3f1ff2d261bc320397f2c560ca672fb543f0b8833e"
+  ],
+  "mux-proxy.js": [
+    "07d6eb4bab65e9abcf6e52f45216903cc82cba890139a149a771733b6f50088a",
+    "52d572aa1e7dd0ddaa3605dbe9df88d844f23eb5a0f01a20046a7f639bedfa9b"
   ]
 };
 const hashes = async () => Promise.all(Object.keys(files).map(async name =>

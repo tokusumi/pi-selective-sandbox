@@ -319,7 +319,7 @@ test("macOS attempts enforce immutable network grants in separate authenticated 
   const observed = await runtime.getViolationsForCommand("proxy-0");
   assert.equal(observed[0].resource, endpoint, "client attribution cannot redirect denial to another invocation");
   await runtime.forgetCommand("proxy-1");
-  await assert.rejects(request(proxies[1], targetPort), /ECONNREFUSED|ECONNRESET/);
+  await assert.rejects(request(proxies[1], targetPort), (error: NodeJS.ErrnoException) => error.code === "ECONNREFUSED" || error.code === "ECONNRESET");
 });
 
 test("a selected root grant keeps the caller's deny rules in the sandbox retry", async t => {
