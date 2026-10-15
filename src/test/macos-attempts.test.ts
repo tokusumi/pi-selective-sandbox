@@ -37,11 +37,11 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
     const markers: string[] = [];
     const executor = new SelectiveSandboxExecutor({ runtime, cwd, sandboxUnavailableMessage: sandboxInitializationError, policy: new CapabilityPolicy([], "ask"), onStatus: marker => markers.push(marker),
       runner: { runSandbox: async wrapped => { attempts++; return runSandbox(wrapped); }, runHost: async () => { throw new Error("Unexpected host replay"); } },
-      approvals: createApprovalProvider({ hasUI: true, ui: { select: async (_message, choices) => {
+      approvals: createApprovalProvider({ hasUI: true, ui: { select: async (message, choices) => {
         const expected = resources[rounds];
         if (choices.includes(expected)) return expected;
         if (choices.includes("Once")) return "Once";
-        assert.ok(choices.includes("Allow and retry"));
+        assert.ok(choices.includes("Allow and retry"), `Unexpected approval after ${rounds} approvals: ${JSON.stringify({ expected, message, choices })}`);
         rounds++;
         return "Allow and retry";
       } } }, new SessionGrantStore())
