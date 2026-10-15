@@ -8,7 +8,7 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
  import * as path from 'path';
  import { logForDebugging } from '../utils/debug.js';
  import { whichSync } from '../utils/which.js';
-@@ -1031,78 +1032,94 @@
+@@ -1031,78 +1032,118 @@
   * Start monitoring macOS system logs for sandbox violations
   * Look for sandbox-related kernel deny events ending in {logTag}
   */
@@ -16,6 +16,11 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 -/** Map a decoded attribution key (commandId) to the command text it
 - *  represents; identity when omitted. Applied before ignoreViolations
 - *  matching and before the event's `command` is set. */
++let macOSLogMonitorStatus = { state: 'not-started', records: 0, accepted: 0, rejected: 0, malformed: 0, oversized: 0, ignored: 0, stderrBytes: 0 };
++/** Diagnostic only. A live log process is not evidence of complete OS telemetry. */
++export function getMacOSSandboxLogMonitorStatus() {
++    return { ...macOSLogMonitorStatus };
++}
 +export function startMacOSSandboxLogMonitor(callback, ignoreViolations,
 +/** Resolve the opaque attribution key through the manager's command registry. */
  resolveCommandText = id => id) {
@@ -36,6 +41,8 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 +    let pending = '';
 +    let discarding = false;
 +    let stopped = false;
++    const status = { state: 'starting', records: 0, accepted: 0, rejected: 0, malformed: 0, oversized: 0, ignored: 0, stderrBytes: 0 };
++    macOSLogMonitorStatus = status;
 +    const logProcess = spawn('/usr/bin/log', [
 +        'stream', '--predicate', `(eventMessage ENDSWITH "${sessionSuffix}")`,
 +        '--style', 'ndjson',
@@ -46,15 +53,21 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 -        const violationLine = lines.find(line => line.includes('Sandbox:') && line.includes('deny'));
 -        const commandLine = lines.find(line => line.startsWith('CMD64_'));
 -        if (!violationLine)
++    status.pid = logProcess.pid;
++    logProcess.on('spawn', () => { if (!stopped) status.state = 'running'; });
 +    const consume = record => {
 +        if (!record.trim()) return;
++        status.records++;
++        status.lastRecordAt = Date.now();
 +        let event;
 +        try { event = JSON.parse(record); }
 +        catch {
 +            // The startup banner is not a log record. Other malformed records
 +            // are diagnostic only and never authorize an escalation.
-+            if (!record.startsWith('Filtering the log data'))
++            if (!record.startsWith('Filtering the log data')) {
++                status.malformed++;
 +                logForDebugging('[Sandbox Monitor] Ignoring malformed log record');
++            }
              return;
 -        // Extract violation details
 -        const sandboxMatch = violationLine.match(sandboxExtractRegex);
@@ -62,16 +75,17 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 +        }
 +        if (!event || event.processID !== 0 || event.processImagePath !== '/kernel' ||
 +            event.senderImagePath !== '/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox' ||
-+            typeof event.eventMessage !== 'string') return;
++            typeof event.eventMessage !== 'string') { status.rejected++; return; }
 +        const match = event.eventMessage.match(eventPattern);
-+        if (!match) return;
++        if (!match) { status.rejected++; return; }
 +        const [, violationDetails, encodedCommand] = match;
-+        if (!/^.+?\(\d+\)\s+deny(?:\(\d+\))?\s/.test(violationDetails)) return;
++        if (!/^.+?\(\d+\)\s+deny(?:\(\d+\))?\s/.test(violationDetails)) { status.rejected++; return; }
 +        // Reject permissively decoded or non-canonical base64 attribution.
-+        if (Buffer.from(encodedCommand, 'base64').toString('base64') !== encodedCommand) return;
++        if (Buffer.from(encodedCommand, 'base64').toString('base64') !== encodedCommand) { status.rejected++; return; }
 +        let command;
 +        try { command = resolveCommandText(decodeSandboxedCommand(encodedCommand)); }
 +        catch {
++            status.rejected++;
 +            logForDebugging('[Sandbox Monitor] Ignoring invalid command attribution');
              return;
 -        const violationDetails = sandboxMatch[1];
@@ -110,8 +124,9 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 -        });
 -    });
 -    logProcess.stderr?.on('data', (data) => {
-+            violationDetails.includes('mach-lookup com.apple.analyticsd')) return;
-+        if (shouldIgnoreViolation(violationDetails, command, ignoreViolations)) return;
++            violationDetails.includes('mach-lookup com.apple.analyticsd')) { status.ignored++; return; }
++        if (shouldIgnoreViolation(violationDetails, command, ignoreViolations)) { status.ignored++; return; }
++        status.accepted++;
 +        callback({ line: violationDetails, command, encodedCommand, timestamp: new Date() });
 +    };
 +    const ingest = data => {
@@ -123,12 +138,14 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 +            pending = pending.slice(boundary + 1);
 +            if (discarding) { discarding = false; continue; }
 +            if (record.length > maxRecordLength) {
++                status.oversized++;
 +                logForDebugging('[Sandbox Monitor] Ignoring oversized log record');
 +                continue;
 +            }
 +            consume(record);
 +        }
 +        if (pending.length > maxRecordLength) {
++            status.oversized++;
 +            pending = '';
 +            discarding = true;
 +            logForDebugging('[Sandbox Monitor] Ignoring oversized log record');
@@ -143,19 +160,26 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 +    logProcess.stdout?.on('data', ingest);
 +    logProcess.stdout?.on('end', end);
 +    logProcess.stderr?.on('data', data => {
++        status.stderrBytes += data.length;
          logForDebugging(`[Sandbox Monitor] Log stream stderr: ${data.toString()}`);
      });
 -    logProcess.on('error', (error) => {
 +    logProcess.on('error', error => {
++        if (!stopped) status.state = 'error';
++        status.errorCode = typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? error.code : 'UNKNOWN';
          logForDebugging(`[Sandbox Monitor] Failed to start log stream: ${error.message}`);
      });
 -    logProcess.on('exit', (code) => {
-+    logProcess.on('exit', code => {
++    logProcess.on('exit', (code, signal) => {
++        if (!stopped) status.state = 'exited';
++        status.exitCode = code;
++        status.signal = typeof signal === 'string' && /^SIG[A-Z0-9]+$/.test(signal) ? signal : null;
          logForDebugging(`[Sandbox Monitor] Log stream exited with code: ${code}`);
      });
      return () => {
 +        if (stopped) return;
 +        stopped = true;
++        status.state = 'stopped';
 +        logProcess.stdout?.removeListener('data', ingest);
 +        logProcess.stdout?.removeListener('end', end);
 +        pending = '';
@@ -165,7 +189,7 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
-@@ -58,6 +58,8 @@
+@@ -58,11 +58,30 @@
  export declare function macGetMandatoryDenyPatterns(allowGitConfig?: boolean): string[];
  export interface SandboxViolationEvent {
      line: string;
@@ -174,6 +198,28 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
      command?: string;
      encodedCommand?: string;
      timestamp: Date;
+ }
+ export type SandboxViolationCallback = (violation: SandboxViolationEvent) => void;
++/** Diagnostic only: running does not guarantee kernel denial delivery. */
++export interface MacOSSandboxLogMonitorStatus {
++    state: 'not-started' | 'starting' | 'running' | 'error' | 'exited' | 'stopped';
++    pid?: number;
++    errorCode?: string;
++    exitCode?: number | null;
++    signal?: string | null;
++    records: number;
++    accepted: number;
++    rejected: number;
++    malformed: number;
++    oversized: number;
++    ignored: number;
++    stderrBytes: number;
++    lastRecordAt?: number;
++}
++export declare function getMacOSSandboxLogMonitorStatus(): MacOSSandboxLogMonitorStatus;
+ /**
+  * Wrap command with macOS sandbox
+  */
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-violation-store.js b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-violation-store.js
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-violation-store.js
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-violation-store.js

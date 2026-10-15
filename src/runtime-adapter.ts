@@ -1,4 +1,6 @@
 import { SandboxManager, type SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { getMacOSSandboxLogMonitorStatus } from "@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -12,16 +14,29 @@ export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead
 
 // Foreground children share a process. Jiti reloads may instantiate another
 // copy of this module, so both SDK ownership and leases must be process-wide.
-type SharedRuntime = { manager: typeof SandboxManager; instances: Set<AnthropicSandboxRuntime> };
+type SharedRuntime = { manager: typeof SandboxManager; monitorStatus?: typeof getMacOSSandboxLogMonitorStatus; instances: Set<AnthropicSandboxRuntime> };
 function sharedRuntime(): SharedRuntime {
   const key = Symbol.for("pi-selective-sandbox.runtime.v1");
   const root = globalThis as typeof globalThis & { [key: symbol]: SharedRuntime | undefined };
   let shared = root[key];
   if (!shared) {
-    shared = { manager: SandboxManager, instances: new Set() };
+    shared = { manager: SandboxManager, monitorStatus: getMacOSSandboxLogMonitorStatus, instances: new Set() };
     root[key] = shared;
   }
+  shared.monitorStatus ??= getMacOSSandboxLogMonitorStatus;
   return shared;
+}
+
+function monitorStatus(): ReturnType<typeof getMacOSSandboxLogMonitorStatus> {
+  // Keep diagnostics tied to the same SDK copy as the process-wide manager.
+  return sharedRuntime().monitorStatus!();
+}
+
+/** SDK 0.0.76 truncates both telemetry and registry keys at 100 characters.
+ * Hash the entire identity (including the executor's attempt suffix), not a prefix.
+ * JSON framing avoids ambiguous namespace/ID concatenations. */
+export function sandboxCommandKey(namespace: string, commandId: string): string {
+  return `pi-${createHash("sha256").update(JSON.stringify([namespace, commandId])).digest("hex")}`;
 }
 
 /** Carries the configured flag even when initialization fails; not process health. */
@@ -68,6 +83,9 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
 export function sandboxInitializationError(error: unknown): string {
   if (error instanceof SandboxInitializationFailure) error = error.cause;
   const detail = error instanceof Error ? `${error.message}\n${error.cause instanceof Error ? error.cause.message : ""}` : String(error);
+  if (process.platform === "darwin" && /listen\s+(?:EPERM|EACCES).*srt-mux-[^\s]*\.sock/i.test(detail)) {
+    return "macOS sandbox proxy initialization is unavailable: the SDK's private Unix socket bind was denied (srt-mux-*.sock). An enclosing sandbox or host policy may block AF_UNIX even when loopback TCP works. Start Pi outside the enclosing sandbox, or have its owner explicitly permit only the required private socket paths. Unix sockets were not globally allowed; host execution was not attempted.";
+  }
   if (/strace|ptrace|PTRACE/i.test(detail)) {
     return "Linux sandbox observation is unavailable because strace could not trace commands. Host execution was not attempted.";
   }
@@ -108,8 +126,13 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   private readonly proxies = new Map<string, CommandNetworkProxy>();
   private readonly strace = new Map<string, StraceViolationObserver>();
   private disposed = false;
-  private commandKey(id: string): string { return this.settings.commandNamespace ? `${this.settings.commandNamespace}:${id}` : id; }
-  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {}
+  private readonly namespace: string;
+  private readonly observationDiagnostics = new Map<string, string>();
+  private readonly monitorAtStart = new Map<string, ReturnType<typeof getMacOSSandboxLogMonitorStatus>>();
+  private commandKey(id: string): string { return sandboxCommandKey(this.namespace, id); }
+  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {
+    this.namespace = settings.commandNamespace ?? randomUUID();
+  }
 
   static async initialize(settings: SandboxSettings, enableLogMonitor = process.platform === "darwin"): Promise<AnthropicSandboxRuntime> {
     const ubuntu = await isUbuntu();
@@ -123,12 +146,19 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     const shared = sharedRuntime();
     shared.instances.add(instance);
     try { await shared.manager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, enableLogMonitor); }
-    catch (cause) { shared.instances.delete(instance); throw new SandboxInitializationFailure(cause, enableLogMonitor); }
+    catch (cause) {
+      shared.instances.delete(instance);
+      // Failed SDK initialization may already have started a log process.
+      // Never reset an SDK still leased by a sibling foreground runtime.
+      if (shared.instances.size === 0) await shared.manager.reset().catch(() => {});
+      throw new SandboxInitializationFailure(cause, enableLogMonitor);
+    }
     return instance;
   }
 
   async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
     if (this.disposed) throw new Error("Sandbox runtime has been disposed");
+    if (process.platform === "darwin") this.monitorAtStart.set(context.commandId, monitorStatus());
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
     const policy = this.settings.writePolicy;
     const networkGrants = context.extraCapabilities?.filter(capability => capability.kind === "network") ?? [];
@@ -170,6 +200,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
 
   async forgetCommand(commandId: string): Promise<void> {
     this.strace.delete(commandId);
+    this.observationDiagnostics.delete(commandId);
+    this.monitorAtStart.delete(commandId);
     const proxy = this.proxies.get(commandId);
     this.proxies.delete(commandId);
     await proxy?.close();
@@ -220,7 +252,19 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         } catch (error) { finish([], error); }
       });
     }
+    if (process.platform === "darwin" && upstream.length === 0) {
+      const key = this.commandKey(commandId);
+      const matchingEvents = store.getViolationsForCommand(key).length;
+      const monitor = monitorStatus();
+      this.observationDiagnostics.set(commandId,
+        `Sandbox observation unconfirmed: key=${key}; waitMs=${this.logMonitorEnabled ? 1000 : 0}; configured=${this.logMonitorEnabled}; matchingEvents=${matchingEvents}; monitorAtStart=${JSON.stringify(this.monitorAtStart.get(commandId) ?? null)}; monitor=${JSON.stringify(monitor)}. ` +
+        "No supported denial was observed before the deadline. EPERM alone does not identify a permission resource; no permission was inferred and host execution was not attempted. Compare this key with an independent host log capture and check the monitor state and counters.");
+    }
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
+  }
+
+  getObservationDiagnostic(commandId: string): string | undefined {
+    return this.observationDiagnostics.get(commandId);
   }
 
   /** Release only this session's proxies; keep siblings' SDK monitoring alive. */
@@ -229,6 +273,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     this.disposed = true;
     await Promise.all([...this.proxies.keys()].map(id => this.forgetCommand(id)));
     this.strace.clear();
+    this.observationDiagnostics.clear();
+    this.monitorAtStart.clear();
     const shared = sharedRuntime();
     shared.instances.delete(this);
     if (shared.instances.size === 0) await shared.manager.reset();
@@ -236,7 +282,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
 
   static async reset(): Promise<void> {
     const shared = sharedRuntime();
-    for (const instance of shared.instances) { instance.disposed = true; instance.strace.clear(); }
+    for (const instance of shared.instances) { instance.disposed = true; instance.strace.clear(); instance.observationDiagnostics.clear(); instance.monitorAtStart.clear(); }
     shared.instances.clear();
     await closeCommandNetworkProxies();
     await shared.manager.reset();

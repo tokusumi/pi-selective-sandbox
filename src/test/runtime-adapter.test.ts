@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import { SandboxManager, SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
-import { AnthropicSandboxRuntime, buildSandboxRuntimeConfig, isUbuntuRelease, sandboxInitializationError } from "../runtime-adapter.js";
+import { AnthropicSandboxRuntime, buildSandboxRuntimeConfig, isUbuntuRelease, sandboxInitializationError, sandboxCommandKey } from "../runtime-adapter.js";
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { CapabilityPolicy } from "../policy.js";
 import { createApprovalProvider } from "../pi-extension.js";
@@ -18,10 +18,10 @@ async function macOSFixture(t: TestContext) {
   const store = new SandboxViolationStore();
   t.mock.method(SandboxManager, "getSandboxViolationStore", () => store);
   t.mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => command);
-  const settings = { cwd: "/worktree", writePolicy: { allow: ["/worktree"], deny: [] } };
+  const settings = { cwd: "/worktree", writePolicy: { allow: ["/worktree"], deny: [] }, commandNamespace: "test-session" };
   const runtime = await AnthropicSandboxRuntime.initialize(settings);
   const record = (commandId: string, line: string) => store.addViolation({
-    line, encodedCommand: Buffer.from(commandId).toString("base64"), timestamp: new Date()
+    line, encodedCommand: Buffer.from(sandboxCommandKey(settings.commandNamespace, commandId)).toString("base64"), timestamp: new Date()
   });
   return { runtime, store, initialize, settings, record };
 }
