@@ -268,6 +268,16 @@ npm run check
 npm test
 ```
 
+For **local macOS only**, `macos_sandbox_test` runs the fixed OS-integration
+group from this development checkout after a fresh, once-only human approval.
+The prompt shows the exact command and canonical cwd and warns that build/test
+code runs with host permissions. It does not change bash/write/edit enforcement,
+use stored grants, or run headlessly or in CI. Reload the updated extension to
+expose the tool. From a normal host terminal, the same group is available as
+`npm run test:macos`. An already sandboxed runner fails before building/testing;
+it never skips the tests or disables a sandbox. This subset does not replace
+`npm test`; the full-suite command and CI workflow are unchanged.
+
 The SDK is pinned to `0.0.76`. `npm ci` applies
 `patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
 Git and checking exact SDK file hashes before and after application. Do not

@@ -17,6 +17,7 @@ import { createSubagentSupport, type RequiredChildApi } from "./subagent-support
 import { gitApprovalPaths, pathContains, resolveGitWritePaths, worktreeRemovalParent, type GitWritePaths } from "./git-write-paths.js";
 import { createBoundaryAwareEditTool, createBoundaryAwareWriteTool } from "./mutation-tools.js";
 import { SelectiveSandboxExecutor } from "./executor.js";
+import { createMacOSTestTool, isLocalMacOS } from "./macos-test-tool.js";
 import { runTracedSandbox } from "./strace-runner.js";
 import { CapabilityPolicy } from "./policy.js";
 import { ProjectGrantStore } from "./project-grants.js";
@@ -289,6 +290,14 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   const mutationOptions = { cwd, writePolicy: () => writePolicy, approvals: approvalProvider, isEnabled };
   pi.registerTool(await createBoundaryAwareWriteTool(mutationOptions) as never);
   pi.registerTool(await createBoundaryAwareEditTool(mutationOptions) as never);
+  if (isLocalMacOS()) {
+    pi.registerTool(createMacOSTestTool(async (id, commandCwd, command, signal, onUpdate) => {
+      const hostTests = createBashTool(commandCwd, {
+        operations: { exec: (raw, hostCwd, opts) => runCommand(localOperations, raw, hostCwd, opts) }
+      });
+      return redactToolResult(await hostTests.execute(id, { command, timeout: 300 }, signal, onUpdate));
+    }));
+  }
 }
 
 export function emitExecutorOutput(output: Pick<CommandResult, "stdout" | "stderr">, onData: (chunk: Buffer) => void): void {

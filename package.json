@@ -15,6 +15,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:macos": "node scripts/run-local-macos-tests.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "postinstall": "node scripts/apply-sandbox-runtime-patch.mjs"
   },
