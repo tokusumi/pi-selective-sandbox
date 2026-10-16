@@ -6,6 +6,7 @@ import test from "node:test";
 import type { RegisteredCommand, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import selectiveSandboxExtension, { emitExecutorOutput, emitSandboxStatus, minimalWriteRoots, redactToolResult } from "../pi-extension.js";
 import { DEFAULT_WRITE_PROFILES } from "../config.js";
+import { isLocalMacOS } from "../macos-test-tool.js";
 import { AnthropicSandboxRuntime } from "../runtime-adapter.js";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
@@ -18,9 +19,33 @@ test("Pi entrypoint registers a replacement bash tool", async () => {
     registerCommand: (name: string) => { commands.push(name); },
     registerTool: (value: { name: string }) => { tools.push(value); }
   } as never);
-  assert.deepEqual(tools.map(tool => tool.name), ["bash", "write", "edit"]);
+  assert.deepEqual(tools.map(tool => tool.name), ["bash", "write", "edit", ...(isLocalMacOS() ? ["macos_sandbox_test"] : [])]);
   assert.deepEqual(events, ["session_start", "tool_call", "session_shutdown"]);
   assert.deepEqual(commands, ["selective-sandbox"]);
+});
+
+test("the host test tool is registered only on local macOS, never on Linux or CI", async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const env = { CI: process.env.CI, GITHUB_ACTIONS: process.env.GITHUB_ACTIONS };
+  t.after(() => {
+    Object.defineProperty(process, "platform", platform);
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  for (const [os, ci, actions, registered] of [
+    ["linux", "", "", false], ["darwin", "true", "", false],
+    ["darwin", "", "true", false], ["darwin", "", "", true]
+  ] as const) {
+    Object.defineProperty(process, "platform", { ...platform, value: os });
+    process.env.CI = ci;
+    process.env.GITHUB_ACTIONS = actions;
+    const names: string[] = [];
+    await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined,
+      registerTool: (tool: { name: string }) => { names.push(tool.name); } } as never);
+    assert.equal(names.includes("macos_sandbox_test"), registered);
+    assert.deepEqual(names.slice(0, 3), ["bash", "write", "edit"]);
+  }
 });
 
 test("package manifest exposes the compiled Pi extension", async () => {

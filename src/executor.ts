@@ -29,9 +29,19 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return this.finish(attempt, "sandbox", priorViolations); }
 
       let observed;
-      try { observed = await runtime.getViolationsForCommand(commandId); }
+      let observationDiagnostic: string | undefined;
+      try {
+        observed = await runtime.getViolationsForCommand(commandId);
+        observationDiagnostic = runtime.getObservationDiagnostic?.(commandId);
+      }
       finally { await runtime.forgetCommand?.(commandId); }
-      if (observed.length === 0) return this.finish(attempt, "sandbox", priorViolations);
+      if (observed.length === 0) {
+        if (observationDiagnostic) {
+          this.status("observation-unconfirmed");
+          attempt = { ...attempt, stderr: `${attempt.stderr}${attempt.stderr.endsWith("\n") || !attempt.stderr ? "" : "\n"}${observationDiagnostic}\n` };
+        }
+        return this.finish(attempt, "sandbox", priorViolations);
+      }
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
       const wideningBlocked = prepared === undefined;

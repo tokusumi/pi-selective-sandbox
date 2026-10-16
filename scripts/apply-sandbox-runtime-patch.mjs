@@ -20,15 +20,19 @@ const files = {
   ],
   "macos-sandbox-utils.js": [
     "5e7672b216ac850e28c9ea90688d705a068ad6f8d1f2ece7e8399c7db92319dd",
-    "7d36d8254d378bdccdd91c66aee9ea41d987672c3903c2679cd3ad22223bdc7d"
+    "bf4e8a085f90587f4b71bc5e7ba899190422b1fdb4edf53742e41539d2d411d5"
   ],
   "macos-sandbox-utils.d.ts": [
     "2b4727a648b59bbe41d6ac0dc492b9b7adc39d6e7dc05c10285cc9670d6244ac",
-    "8c251de694089d2ab7b88fbddc6eb6512f6f2222251b27925fd87aae34a63478"
+    "93f353f08422dc360925fc79d7906bdb0bb9884676470428122052bbc3cfbb35"
   ],
   "sandbox-violation-store.js": [
     "e7524fb72e0d483ebc572bb3e37d1baf472db59714c3f3935824e9d3b82b2142",
     "67716e596b38bb7d00435d3f1ff2d261bc320397f2c560ca672fb543f0b8833e"
+  ],
+  "mux-proxy.js": [
+    "07d6eb4bab65e9abcf6e52f45216903cc82cba890139a149a771733b6f50088a",
+    "52d572aa1e7dd0ddaa3605dbe9df88d844f23eb5a0f01a20046a7f639bedfa9b"
   ]
 };
 const hashes = async () => Promise.all(Object.keys(files).map(async name =>

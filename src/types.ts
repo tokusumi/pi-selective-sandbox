@@ -23,6 +23,8 @@ export type SandboxRuntime = {
   supportsNetworkWidening?: boolean;
   wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
   getViolationsForCommand(commandId: string): readonly SandboxViolation[] | Promise<readonly SandboxViolation[]>;
+  /** Diagnostic only; missing telemetry never authorizes escalation. Read before forgetCommand. */
+  getObservationDiagnostic?(commandId: string): string | undefined;
   traceSinkForCommand?(commandId: string): ((chunk: Buffer) => void) | undefined;
   forgetCommand?(commandId: string): void | Promise<void>;
 };
