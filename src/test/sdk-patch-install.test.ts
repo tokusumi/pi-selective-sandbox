@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 const project = fileURLToPath(new URL("../../", import.meta.url));
-const names = ["sandbox-manager.js", "sandbox-manager.d.ts", "macos-sandbox-utils.js", "macos-sandbox-utils.d.ts", "sandbox-violation-store.js"];
+const names = ["sandbox-manager.js", "sandbox-manager.d.ts", "macos-sandbox-utils.js", "macos-sandbox-utils.d.ts", "sandbox-violation-store.js", "mux-proxy.js"];
 
 async function installFixture(t: TestContext, nested = false) {
   const base = await mkdtemp(join(tmpdir(), "pi-sdk-patch-"));

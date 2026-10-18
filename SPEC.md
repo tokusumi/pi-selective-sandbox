@@ -418,6 +418,20 @@ policy, or a nested-userns/seccomp restriction, the unavailable
 result describes that class and the relevant operator action. Diagnostics do
 not weaken or choose the security boundary.
 
+### Explicit local macOS integration testing
+
+Outside CI, local macOS exposes `macos_sandbox_test` as a separate development
+operation, not an ordinary bash fallback. It accepts no command/path arguments
+and runs only the fixed local integration entrypoint in this development checkout.
+Every invocation requires fresh human UI approval displaying the exact command,
+canonical cwd, once-only scope, and unsandboxed build/test authority. Headless
+calls, missing/invalid approval, cancellation, changed checkout identity, and
+non-macOS/CI invocation deny execution. No resource or host grant substitutes
+for this approval, and bash/write/edit enforcement is not changed. If the runner
+cannot create a Seatbelt sandbox, it fails before building or testing rather
+than skipping the tests. This subset never replaces full-suite verification;
+`npm test` and CI retain their existing execution path.
+
 ## 16. Non-goals / current limitations
 
 - This project is early development software; its APIs, persistence formats,

@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { syncBuiltinESMExports } from "node:module";
 import { PassThrough } from "node:stream";
 import { SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
-import { startMacOSSandboxLogMonitor } from "@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js";
+import { startMacOSSandboxLogMonitor, getMacOSSandboxLogMonitorStatus } from "@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js";
 
 function monitorFixture(t: TestContext) {
   const child = Object.assign(new EventEmitter(), {
@@ -95,4 +95,36 @@ test("SDK keeps raw resources separate from safe presentation text", () => {
   const event = store.getViolationsForCommand("path")[0];
   assert.equal(event.rawLine, raw);
   assert.equal(event.line, raw.replace(/[<>]/g, ""));
+});
+
+
+test("SDK monitor health and parser counters are observable without trusting stderr as permissions", t => {
+  const { child, store, event, stop } = monitorFixture(t);
+  assert.equal(getMacOSSandboxLogMonitorStatus().state, "starting");
+  child.emit("spawn");
+  child.stdout.emit("data", Buffer.from("{malformed}\n"));
+  child.stdout.emit("data", Buffer.from(JSON.stringify({ ...event("A", "/spoofed"), processID: 123 }) + "\n"));
+  child.stdout.emit("data", Buffer.from(JSON.stringify(event("A", "/real")) + "\n"));
+  child.stderr.emit("data", Buffer.from("EPERM /untrusted-resource\x1b[31m"));
+  const status = getMacOSSandboxLogMonitorStatus();
+  assert.equal(status.state, "running");
+  assert.equal(status.records, 3);
+  assert.equal(status.accepted, 1);
+  assert.equal(status.rejected, 1);
+  assert.equal(status.malformed, 1);
+  assert.ok(status.stderrBytes > 0);
+  assert.ok(status.lastRecordAt);
+  assert.doesNotMatch(JSON.stringify(status), /untrusted-resource/);
+  status.state = "stopped";
+  assert.equal(getMacOSSandboxLogMonitorStatus().state, "running", "snapshots cannot mutate health");
+  child.emit("error", Object.assign(new Error("sensitive detail"), { code: "EPERM" }));
+  assert.equal(getMacOSSandboxLogMonitorStatus().state, "error");
+  assert.equal(getMacOSSandboxLogMonitorStatus().errorCode, "EPERM");
+  child.emit("exit", 1, null);
+  assert.equal(getMacOSSandboxLogMonitorStatus().state, "exited");
+  assert.equal(getMacOSSandboxLogMonitorStatus().exitCode, 1);
+  assert.equal(store.getCount(), 1);
+  stop();
+  child.emit("exit", null, "SIGTERM");
+  assert.equal(getMacOSSandboxLogMonitorStatus().state, "stopped", "intentional teardown is not a crash");
 });
