@@ -12,9 +12,9 @@ import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetw
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string; allowLocalBinding?: boolean };
 
-// Platform TLS verification (including gh/Go) requires this exact Mach service.
-// It is baseline OS infrastructure, not a domain grant or host replay permission.
-const MACOS_TRUST_SERVICE = "com.apple.trustd.agent";
+// Exact OS services for certificate verification, native process listing and
+// directory notifications. These daemons are a trusted baseline, not host replay.
+const MACOS_BASELINE_MACH_SERVICES = ["com.apple.trustd.agent", "com.apple.sysmond", "com.apple.FSEvents"] as const;
 
 // Foreground children share a process. Jiti reloads may instantiate another
 // copy of this module, so both SDK ownership and leases must be process-wide.
@@ -80,7 +80,7 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
       // not just binding to 127.0.0.1. External egress still requires the proxy.
       ...(process.platform === "darwin" ? {
         allowLocalBinding: settings.allowLocalBinding ?? true,
-        allowMachLookup: [MACOS_TRUST_SERVICE]
+        allowMachLookup: [...MACOS_BASELINE_MACH_SERVICES]
       } : {}),
       ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
@@ -187,11 +187,11 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] },
         // A foreground sibling may have initialized the shared SDK with a
         // different policy. Preserve this session's local-binding setting and
-        // exact platform trust service on every attempt.
+        // exact baseline Mach services on every attempt.
         ...(process.platform === "darwin" ? { network: {
           allowedDomains: [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], deniedDomains: [],
           allowLocalBinding: this.settings.allowLocalBinding ?? true,
-          allowMachLookup: [MACOS_TRUST_SERVICE]
+          allowMachLookup: [...MACOS_BASELINE_MACH_SERVICES]
         } } : {})
       }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {

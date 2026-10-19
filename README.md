@@ -89,6 +89,12 @@ trusted infrastructure: its own certificate-related network activity is outside
 the command's proxy policy. This baseline also applies with local binding disabled
 or all destination profiles disabled. Reload Pi after updating the extension.
 
+Native process listing and directory notifications also work by default through
+exact Mach lookups of `com.apple.sysmond` and `com.apple.FSEvents`. They need no
+approval or host replay. These host services are trusted infrastructure, not
+path-scoped write grants; see [their security risks](docs/macos-ipc-security-risks.md),
+including host information visibility and the root-only FSEvents purge API.
+
 Local test servers work without port approvals by default. The extension enables
 the SDK's `allowLocalBinding`: listeners may use any local port (including port
 `0` for an ephemeral port), and commands may use TCP/UDP directly on IPv4/IPv6

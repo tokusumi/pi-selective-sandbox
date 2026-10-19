@@ -63,7 +63,7 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
   }
 });
 
-test("macOS attempts include platform trust even when the shared SDK started without it", { skip: process.platform !== "darwin" }, async t => {
+test("macOS attempts include baseline Mach services even when the shared SDK started without them", { skip: process.platform !== "darwin" }, async t => {
   const cwd = process.cwd();
   await SandboxManager.initialize({ filesystem: { allowRead: [], denyRead: [], allowWrite: [cwd], denyWrite: [] },
     network: { allowedDomains: [], deniedDomains: [], allowMachLookup: [] } }, undefined, false);
@@ -72,7 +72,10 @@ test("macOS attempts include platform trust even when the shared SDK started wit
   const id = "platform-trust-after-shared-startup";
   const wrapped = await runtime.wrap("true", { commandId: id, commandText: "true" });
   t.after(() => runtime.forgetCommand(id));
-  assert.equal(wrapped.split('(global-name "com.apple.trustd.agent")').length - 1, 1);
+  for (const service of ["com.apple.trustd.agent", "com.apple.sysmond", "com.apple.FSEvents"]) {
+    assert.equal(wrapped.split(`(global-name "${service}")`).length - 1, 1);
+  }
+  assert.doesNotMatch(wrapped, /\(allow mach-lookup\)/);
   assert.doesNotMatch(wrapped, /\(allow network\*\)/);
   assert.doesNotMatch(wrapped, /\(allow system-socket \(socket-domain AF_UNIX\)\)/);
 });

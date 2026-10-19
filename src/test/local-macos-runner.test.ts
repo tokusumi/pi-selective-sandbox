@@ -30,7 +30,7 @@ test("local runner probes Seatbelt, builds, and executes the fixed integration f
   assert.deepEqual(result.calls, [
     ["/usr/bin/sandbox-exec", ["-p", "(version 1) (allow default)", "/usr/bin/true"]],
     [process.execPath, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.json"]],
-    [process.execPath, ["--test", "dist/test/loopback-sandbox.test.js", "dist/test/macos-attempts.test.js", "dist/test/network-sandbox.test.js"]]
+    [process.execPath, ["--test", "dist/test/loopback-sandbox.test.js", "dist/test/macos-attempts.test.js", "dist/test/native-macos.test.js", "dist/test/network-sandbox.test.js"]]
   ]);
   assert.match(result.logs.join("\n"), /not the full npm test suite/);
 });
