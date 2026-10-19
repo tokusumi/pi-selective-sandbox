@@ -163,15 +163,24 @@ Host replay is a separate `Run outside sandbox…` action with its own duration
 and final exact-command confirmation, displaying command, canonical cwd and
 execution mode when available. It never turns a resource choice into host
 authority. Unsupported violations and configured-deny intersections offer no
-resource selection, but can offer that separate host confirmation. Both retry
-paths warn that the entire command runs again and can repeat earlier effects.
+resource selection, but can offer that separate host confirmation. The host-only
+prompt lists all observed capability kinds, targets, and available denial messages.
+The executor supplies diagnostic-only reasons distinguishing unsupported network
+runtimes, network targets without an approvable exact proxy endpoint, unsupported
+read widening, and rejected write-scope preparation. A write-scope preparation
+rejection suppresses all resource candidates, including otherwise valid network
+endpoints. Requests without reason metadata use a neutral sandbox-resource
+fallback, not a filesystem or deny-root diagnosis. Correlated denials do not
+prove the cause of every command error; TLS error text alone is not a violation.
+Both retry paths warn that the entire command runs again and can repeat earlier effects.
 Native write/edit retain exact-target preflight approval, without this ancestor
 selection or host action.
 
 All attempts may remain visible in the streamed execution transcript. Before
 requesting approval for a detected violation, the extension streams
 `<sandbox: approval-required filesystem.write>` (or the detected capability
-kind). Approval then streams `<sandbox: approved widen retry>`,
+kind; for mixed denials the marker names the first kind, while the approval
+prompt discloses all observed targets). Approval then streams `<sandbox: approved widen retry>`,
 `<sandbox: approved host-replay>`, or `<sandbox: approval-denied>`. An approved
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
 Only the final selected attempt determines the tool exit code; denial retains

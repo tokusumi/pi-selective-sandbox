@@ -106,6 +106,12 @@ restrictions remain in force. A different port or hostname needs separate
 approval. Unknown socket denials and DNS/private-address protection failures
 cannot be widened by guessing a destination from the shell command.
 
+When no sandbox resource retry is available, the prompt lists each observed
+capability and target, explains the capability-specific limitation (or write
+scope preparation rejection), and offers only denial or separately confirmed
+exact-command host replay. A correlated denial is not proof of the cause of a
+TLS certificate error; TLS error text alone never requests approval.
+
 Each macOS attempt has its own authenticated HTTP/SOCKS proxy. Approvals do not
 leak into concurrent commands or change the SDK's global allowlist. The proxy
 closes when the attempt ends, including open connections and background

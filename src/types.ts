@@ -46,11 +46,16 @@ export type SandboxApprovalRequest = {
   projectGrantEligible?: boolean;
 };
 
+/** Why a correlated denial cannot currently offer a sandbox resource retry. */
+export type WideningUnavailableReason = "filesystem-write-scope-unavailable" | "network-runtime-unsupported" | "network-target-unavailable" | "filesystem-read-unsupported" | "no-additional-scope";
+
 export type EscalationApprovalRequest = Omit<SandboxApprovalRequest, "kind"> & {
   kind: "escalation";
   commandIdentity?: CommandIdentity;
   /** Raw observed targets, distinct from prepared Git/directory-entry scopes. */
-  observedCapabilities?: readonly Capability[];
+  observedCapabilities?: readonly SandboxViolation[];
+  /** Diagnostic only; never authorizes host execution or infers a target from shell text. */
+  wideningUnavailableReasons?: readonly WideningUnavailableReason[];
 };
 export type ApprovalRequest = SandboxApprovalRequest | EscalationApprovalRequest;
 export type SandboxApprovalDecision = "sandbox-allow-once" | "sandbox-allow-session" | "sandbox-allow-project";
