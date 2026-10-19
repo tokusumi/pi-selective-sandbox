@@ -226,6 +226,8 @@ test("macOS defaults allow local TCP without changing destinations, filesystem, 
   assert.deepEqual(defaults.network.allowedDomains, []);
   assert.equal(defaults.network.allowAllUnixSockets, undefined);
   assert.equal(defaults.network.allowUnixSockets, undefined);
+  assert.deepEqual(defaults.network.allowMachLookup, ["com.apple.trustd.agent"]);
+  assert.equal(defaults.enableWeakerNetworkIsolation, undefined);
   assert.deepEqual(defaults.filesystem, strict.filesystem);
   assert.deepEqual(defaults.network, { ...strict.network, allowLocalBinding: true });
 });
@@ -238,6 +240,7 @@ test("Linux does not opt into the macOS local binding policy", t => {
   for (const ubuntu of [false, true]) {
     const config = buildSandboxRuntimeConfig(settings, ubuntu);
     assert.equal(config.network.allowLocalBinding, undefined);
+    assert.equal(config.network.allowMachLookup, undefined);
     assert.equal(config.network.allowAllUnixSockets, ubuntu ? true : undefined);
   }
 });
@@ -337,6 +340,20 @@ test("macOS attempts enforce immutable network grants in separate authenticated 
   assert.equal(observed[0].resource, endpoint, "client attribution cannot redirect denial to another invocation");
   await runtime.forgetCommand("proxy-1");
   await assert.rejects(request(proxies[1], targetPort), (error: NodeJS.ErrnoException) => error.code === "ECONNREFUSED" || error.code === "ECONNRESET");
+});
+
+test("macOS supplies only the certificate trust service on initial and retry attempts", async t => {
+  const { runtime, initialize } = await macOSFixture(t);
+  assert.deepEqual(initialize.mock.calls[0].arguments[0]?.network.allowMachLookup, ["com.apple.trustd.agent"]);
+  const wrap = t.mock.method(SandboxManager, "wrapWithSandbox", async () => "wrapped");
+  for (const [id, caps] of [["trust-first", []], ["trust-retry", [{ kind: "filesystem.write", resource: "/outside" }]]] as const) {
+    await runtime.wrap("probe", { commandId: id, commandText: "probe", extraCapabilities: caps });
+    t.after(() => runtime.forgetCommand(id));
+    const config = wrap.mock.calls.at(-1)!.arguments[2];
+    assert.deepEqual(config?.network?.allowMachLookup, ["com.apple.trustd.agent"]);
+    assert.equal(config?.network?.allowAllUnixSockets, undefined);
+    assert.equal(config?.enableWeakerNetworkIsolation, undefined);
+  }
 });
 
 test("a selected root grant keeps the caller's deny rules in the sandbox retry", async t => {

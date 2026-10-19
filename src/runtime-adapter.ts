@@ -12,6 +12,10 @@ import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetw
 
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string; allowLocalBinding?: boolean };
 
+// Platform TLS verification (including gh/Go) requires this exact Mach service.
+// It is baseline OS infrastructure, not a domain grant or host replay permission.
+const MACOS_TRUST_SERVICE = "com.apple.trustd.agent";
+
 // Foreground children share a process. Jiti reloads may instantiate another
 // copy of this module, so both SDK ownership and leases must be process-wide.
 type SharedRuntime = { manager: typeof SandboxManager; monitorStatus?: typeof getMacOSSandboxLogMonitorStatus; instances: Set<AnthropicSandboxRuntime> };
@@ -74,7 +78,10 @@ export function buildSandboxRuntimeConfig(settings: SandboxSettings, allowAllUni
       allowedDomains: [...(settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS)], deniedDomains: [],
       // SDK semantics: all-interface listeners + direct loopback connections,
       // not just binding to 127.0.0.1. External egress still requires the proxy.
-      ...(process.platform === "darwin" ? { allowLocalBinding: settings.allowLocalBinding ?? true } : {}),
+      ...(process.platform === "darwin" ? {
+        allowLocalBinding: settings.allowLocalBinding ?? true,
+        allowMachLookup: [MACOS_TRUST_SERVICE]
+      } : {}),
       ...(allowAllUnixSockets ? { allowAllUnixSockets: true } : {})
     }
   };
@@ -179,10 +186,12 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       wrapped = await sharedRuntime().manager.wrapWithSandbox(command, undefined, {
         filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] },
         // A foreground sibling may have initialized the shared SDK with a
-        // different policy. Preserve this session's strict opt-out per attempt.
+        // different policy. Preserve this session's local-binding setting and
+        // exact platform trust service on every attempt.
         ...(process.platform === "darwin" ? { network: {
           allowedDomains: [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], deniedDomains: [],
-          allowLocalBinding: this.settings.allowLocalBinding ?? true
+          allowLocalBinding: this.settings.allowLocalBinding ?? true,
+          allowMachLookup: [MACOS_TRUST_SERVICE]
         } } : {})
       }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {

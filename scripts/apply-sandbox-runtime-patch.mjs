@@ -12,7 +12,7 @@ const patch = join(root, "patches", "sandbox-runtime-0.0.76.patch");
 const files = {
   "sandbox-manager.js": [
     "9eef40ef0700f36a57fa55f253dd48cb2fccadbe8ac4caca5aac47a2e4c686a5",
-    "11ad733b7676c751085e7408f60092d213598586d13fcb4c0d2996276a6389c4"
+    "071a9c5d4a568985c15093d3ccf595fcf00b15fb079f85f4ba15554bddea9b58"
   ],
   "sandbox-manager.d.ts": [
     "c118b0fc98694cee5f33d8136c177153d28f8436c96c349a5a5e00c1129237fa",

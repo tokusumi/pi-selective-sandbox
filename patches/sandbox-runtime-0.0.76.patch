@@ -248,6 +248,15 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-man
                  caCertPath: mitmCA?.trustBundlePath,
                  javaAgentJarPath: needsNetworkProxy ? javaAgentJarPath : undefined,
                  readConfig,
+@@ -1309,7 +1309,7 @@
+                 allowUnixSockets: getAllowUnixSockets(),
+                 allowAllUnixSockets: getAllowAllUnixSockets(),
+                 allowLocalBinding: getAllowLocalBinding(),
+-                allowMachLookup: getAllowMachLookup(),
++                allowMachLookup: customConfig?.network?.allowMachLookup ?? getAllowMachLookup(),
+                 ignoreViolations: getIgnoreViolations(),
+                 allowPty,
+                 allowGitConfig: getAllowGitConfig(),
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
