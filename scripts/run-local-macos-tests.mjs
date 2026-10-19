@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // Keep the existing npm test command and CI unchanged. This explicit local
-// entrypoint runs the four Seatbelt tests and their related network approval checks.
+// entrypoint runs the Seatbelt/platform-trust tests and related network approval checks.
 export const macOSTestFiles = [
   "dist/test/loopback-sandbox.test.js",
   "dist/test/macos-attempts.test.js",

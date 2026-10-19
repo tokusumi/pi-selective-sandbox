@@ -248,6 +248,22 @@ not bypass DNS-rebinding/private-address protection. The proxies preserve SDK
 upstream proxy resolution (explicit SDK configuration, otherwise HTTP_PROXY /
 HTTPS_PROXY and NO_PROXY), with the destination allowlist checked before routing.
 
+### System certificate verification (macOS)
+
+Every macOS attempt permits Mach lookup of exactly `com.apple.trustd.agent` as
+baseline OS infrastructure, so normal system certificate verification (including
+Go/gh HTTPS clients) works inside the sandbox without resource approval or host
+replay. Apply this baseline at SDK startup and on every invocation, including
+retries and native children sharing an already initialized SDK. It is independent
+of destination profiles, local-binding settings, and stored grants. Linux is
+unchanged.
+
+This does not enable arbitrary Mach lookup, Unix sockets, direct external
+TCP/UDP, or the SDK's broader `enableWeakerNetworkIsolation` switch. The command's
+proxy endpoint policy and filesystem policy remain in force. The OS trust daemon
+is part of the trusted host boundary: certificate-related activity it performs
+outside the command sandbox is not constrained by the per-command proxy.
+
 ### Local listeners and loopback (macOS)
 
 The default enables SDK `network.allowLocalBinding` so test/dev listeners and

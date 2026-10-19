@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { X509Certificate } from "node:crypto";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { AnthropicSandboxRuntime, sandboxInitializationError } from "../runtime-adapter.js";
@@ -58,4 +61,54 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
     assert.equal(markers.filter(marker => marker.includes("approval-required")).length, 3);
     await runtime.dispose();
   }
+});
+
+test("macOS attempts include platform trust even when the shared SDK started without it", { skip: process.platform !== "darwin" }, async t => {
+  const cwd = process.cwd();
+  await SandboxManager.initialize({ filesystem: { allowRead: [], denyRead: [], allowWrite: [cwd], denyWrite: [] },
+    network: { allowedDomains: [], deniedDomains: [], allowMachLookup: [] } }, undefined, false);
+  const runtime = await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: { allow: [cwd], deny: [] }, allowedDomains: [] }, false);
+  t.after(() => runtime.dispose());
+  const id = "platform-trust-after-shared-startup";
+  const wrapped = await runtime.wrap("true", { commandId: id, commandText: "true" });
+  t.after(() => runtime.forgetCommand(id));
+  assert.equal(wrapped.split('(global-name "com.apple.trustd.agent")').length - 1, 1);
+  assert.doesNotMatch(wrapped, /\(allow network\*\)/);
+  assert.doesNotMatch(wrapped, /\(allow system-socket \(socket-domain AF_UNIX\)\)/);
+});
+
+test("macOS platform certificate verification succeeds offline without approvals or host replay", { skip: process.platform !== "darwin" }, async t => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), "pi-platform-trust-")));
+  t.after(async () => { await AnthropicSandboxRuntime.reset(); await rm(base, { recursive: true, force: true }); });
+  // Use a currently valid public root as an explicit anchor, never import it
+  // into a keychain. -l permits a CA as the leaf; -L/-R offline forbid fetching.
+  const bundle = await readFile("/etc/ssl/cert.pem", "utf8");
+  const root = bundle.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)?.find(pem => {
+    const certificate = new X509Certificate(pem);
+    return certificate.ca && certificate.checkIssued(certificate) && certificate.verify(certificate.publicKey)
+      && Date.parse(certificate.validFrom) < Date.now() && Date.now() < Date.parse(certificate.validTo);
+  });
+  assert.ok(root, "macOS public CA bundle must contain a valid root");
+  const path = join(base, "public-root.pem");
+  await writeFile(path, root);
+  const args = ["verify-cert", "-c", path, "-r", path, "-p", "basic", "-l", "-L", "-R", "offline"];
+  await exec("/usr/bin/security", args, { timeout: 10000 }); // Validate the fixture on the host first.
+  const runtime = await AnthropicSandboxRuntime.initialize({ cwd: base, writePolicy: { allow: [base], deny: [] }, allowedDomains: [], allowLocalBinding: false });
+  const executor = new SelectiveSandboxExecutor({ runtime, cwd: base, policy: new CapabilityPolicy([], "ask"),
+    approvals: { request: async () => { throw new Error("Platform certificate verification must not request approval"); } },
+    runner: {
+      runSandbox: async command => {
+        try { return { ...await exec("/bin/bash", ["-c", command], { cwd: base, timeout: 10000 }), exitCode: 0 }; }
+        catch (error) {
+          const failed = error as Error & { code: number; stdout: string; stderr: string };
+          if (typeof failed.code !== "number") throw error;
+          return { exitCode: failed.code, stdout: failed.stdout, stderr: failed.stderr };
+        }
+      },
+      runHost: async () => { throw new Error("Platform certificate verification must remain sandboxed"); }
+    }
+  });
+  const result = await executor.execute(["/usr/bin/security", ...args].map(quote).join(" "), "platform-trust-offline");
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.disposition, "sandbox");
 });

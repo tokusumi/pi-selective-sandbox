@@ -80,6 +80,15 @@ Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash
 
 ### Network permission (macOS)
 
+System certificate verification works by default, including `gh` and Go HTTPS
+clients. Every macOS attempt permits the exact `com.apple.trustd.agent` Mach
+service; no extra approval or host replay is needed for certificate verification.
+This does not allow arbitrary Mach services or Unix sockets, change the endpoint
+allowlist, or disable TLS verification. The OS certificate-validation daemon is
+trusted infrastructure: its own certificate-related network activity is outside
+the command's proxy policy. This baseline also applies with local binding disabled
+or all destination profiles disabled. Reload Pi after updating the extension.
+
 Local test servers work without port approvals by default. The extension enables
 the SDK's `allowLocalBinding`: listeners may use any local port (including port
 `0` for an ephemeral port), and commands may use TCP/UDP directly on IPv4/IPv6
@@ -288,7 +297,8 @@ The SDK is pinned to `0.0.76`. `npm ci` applies
 `patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
 Git and checking exact SDK file hashes before and after application. Do not
 skip lifecycle scripts. The patch fixes record attribution, preserves raw resources, and lets the
-macOS wrapper use an embedder-owned per-invocation proxy port/token. It retains
+macOS wrapper use an embedder-owned per-invocation proxy port/token and Mach
+service policy, including when the shared SDK was initialized by another session. It retains
 the SDK's log-stream/store execution path and sanitized presentation text. Unexpected versions or partial/local modifications
 fail installation rather than silently accepting an incomplete patch. An SDK
 upgrade requires reviewing the patch and rerunning the regression tests.
