@@ -283,6 +283,23 @@ test("proxy denials identify exact network endpoints without parsing shell text"
 });
 
 
+test("network telemetry distinguishes proxy allowlist targets from socket and address-protection denials", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  for (const [id, line, resource] of [
+    ["socket", "gh(123) deny(1) network-outbound /private/var/run/example.sock", "/private/var/run/example.sock"],
+    ["ip", "gh(123) deny(1) network-outbound remote ip:192.0.2.1:443", "unknown"],
+    ["guard", "deny network-outbound api.github.com:443 (resolved address is private)", "unknown"],
+    ["allowlist", "deny network-outbound api.github.com:443 (host is not on the allow list)", "api.github.com:443"]
+  ]) {
+    record(id, line);
+    const [violation] = await runtime.getViolationsForCommand(id);
+    assert.equal(violation.kind, "network");
+    assert.equal(violation.resource, resource);
+    assert.equal(violation.message, line);
+  }
+});
+
+
 test("macOS attempts enforce immutable network grants in separate authenticated proxies", async t => {
   const { runtime } = await macOSFixture(t);
   const target = http.createServer((_request, response) => response.end("allowed"));

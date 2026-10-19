@@ -4,7 +4,7 @@ import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
-import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority } from "./types.js";
+import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
 
 export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
 const MAX_SANDBOX_APPROVALS = 16;
@@ -62,8 +62,22 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(attempt, "denied", violations);
       if (approvalsUsed >= MAX_SANDBOX_APPROVALS) return this.finish(attempt, "sandbox", violations);
       const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
+      const wideningUnavailableReasons: WideningUnavailableReason[] = [];
+      if (caps.length === 0) {
+        if (wideningBlocked) wideningUnavailableReasons.push("filesystem-write-scope-unavailable");
+        else {
+          if (violations.some(violation => violation.kind === "filesystem.read")) wideningUnavailableReasons.push("filesystem-read-unsupported");
+          if (violations.some(violation => violation.kind === "network")) {
+            if (!runtime.supportsNetworkWidening) wideningUnavailableReasons.push("network-runtime-unsupported");
+            else if (violations.some(violation => violation.kind === "network" && !canonicalNetworkEndpoint(violation.resource))) wideningUnavailableReasons.push("network-target-unavailable");
+          }
+          if (wideningUnavailableReasons.length === 0) wideningUnavailableReasons.push("no-additional-scope");
+        }
+      }
       this.status(`approval-required ${violations[0].kind}`);
-      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: violations, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
+      // Keep all observed targets for diagnostics: even a stored write grant
+      // cannot override a deny root that suppressed the resource candidates.
+      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: observed, wideningUnavailableReasons, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
       const decision = typeof response === "string" ? response : response.decision;
       if (decision === "host-allow-once" || decision === "host-allow-session" || decision === "host-allow-project") {
         this.status("approved host-replay");

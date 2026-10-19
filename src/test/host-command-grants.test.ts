@@ -9,11 +9,11 @@ import { CapabilityPolicy } from "../policy.js";
 import { ProjectHostCommandGrantStore } from "../project-host-command-grants.js";
 import { SessionGrantStore } from "../session-grants.js";
 import { commandIdentityKey, SessionHostCommandGrantStore } from "../session-host-command-grants.js";
-import type { ApprovalRequest, CommandIdentity, CommandResult, SandboxRuntime } from "../types.js";
+import type { ApprovalRequest, CommandIdentity, CommandResult, EscalationApprovalRequest, SandboxRuntime } from "../types.js";
 
 const command = (cwd = "/project", shellCommand = "npm run build", executionMode = "shell"): CommandIdentity => ({ shellCommand, cwd, executionMode });
 const capability = { kind: "filesystem.write" as const, resource: "/observed/foo" };
-const escalation = (identity?: CommandIdentity): ApprovalRequest => ({
+const escalation = (identity?: CommandIdentity): EscalationApprovalRequest => ({
   kind: "escalation", toolCallId: "call", toolName: "bash", inputDigest: "digest", capabilities: [capability],
   command: identity?.shellCommand ?? "npm run build", replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity: identity
 });
@@ -140,7 +140,7 @@ test("a deny-root violation offers host replay only", async () => {
       return "Run on host";
     } }
   }, new SessionGrantStore(), undefined, new SessionHostCommandGrantStore());
-  assert.equal(await provider.request({ ...escalation(command()), capabilities: [] }), "host-allow-once");
+  assert.equal(await provider.request({ ...escalation(command()), capabilities: [], observedCapabilities: [capability], wideningUnavailableReasons: ["filesystem-write-scope-unavailable"] } satisfies EscalationApprovalRequest), "host-allow-once");
   assert.deepEqual(seen[0].choices, ["Run outside sandbox…", "Deny"]);
   assert.match(seen[0].message, /configured deny root/);
   assert.deepEqual(seen[1].choices, ["Once", "This session"]);
