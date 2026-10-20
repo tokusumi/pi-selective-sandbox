@@ -264,6 +264,21 @@ proxy endpoint policy and filesystem policy remain in force. The OS trust daemon
 is part of the trusted host boundary: certificate-related activity it performs
 outside the command sandbox is not constrained by the per-command proxy.
 
+### Native process listing and directory notifications (macOS)
+
+Every macOS attempt additionally permits exact Mach lookup of
+`com.apple.sysmond` and `com.apple.FSEvents` for native process listing and
+directory notifications, without resource approval or host replay. Apply these
+baseline services at SDK startup and on every invocation, including retries and
+native children sharing an SDK. They are independent of destination profiles,
+local-binding settings and stored grants. Linux is unchanged.
+
+No arbitrary Mach or Unix-socket allowance is added. Direct filesystem deny
+rules remain enforced; daemon RPC is a separate trusted boundary, including the
+root-only FSEvents history purge operation. The confidentiality, privileged-RPC
+and root-execution risks are documented in
+[macOS IPC security risks](docs/macos-ipc-security-risks.md).
+
 ### Local listeners and loopback (macOS)
 
 The default enables SDK `network.allowLocalBinding` so test/dev listeners and

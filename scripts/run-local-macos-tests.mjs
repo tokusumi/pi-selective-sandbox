@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 export const macOSTestFiles = [
   "dist/test/loopback-sandbox.test.js",
   "dist/test/macos-attempts.test.js",
+  "dist/test/native-macos.test.js",
   "dist/test/network-sandbox.test.js"
 ];
 
