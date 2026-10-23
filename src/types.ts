@@ -12,6 +12,9 @@ export type Capability = {
 
 export type SandboxViolation = Capability & { message?: string };
 
+/** Observation metadata is diagnostic only, never evidence for an approval. */
+export type SandboxObservationDiagnostic = { details: string; warning?: string };
+
 export type CommandResult = {
   exitCode: number;
   stdout: string;
@@ -23,8 +26,8 @@ export type SandboxRuntime = {
   supportsNetworkWidening?: boolean;
   wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly Capability[] }): Promise<string>;
   getViolationsForCommand(commandId: string): readonly SandboxViolation[] | Promise<readonly SandboxViolation[]>;
-  /** Diagnostic only; missing telemetry never authorizes escalation. Read before forgetCommand. */
-  getObservationDiagnostic?(commandId: string): string | undefined;
+  /** Read before forgetCommand. Details are debug-only; only known monitor problems warn by default. */
+  getObservationDiagnostic?(commandId: string): SandboxObservationDiagnostic | undefined;
   traceSinkForCommand?(commandId: string): ((chunk: Buffer) => void) | undefined;
   forgetCommand?(commandId: string): void | Promise<void>;
 };

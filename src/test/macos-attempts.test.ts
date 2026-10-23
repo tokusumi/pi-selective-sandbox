@@ -63,6 +63,39 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
   }
 });
 
+test("real macOS ordinary failures preserve output and expose observation details only to debug", { skip: process.platform !== "darwin" }, async t => {
+  const cwd = process.cwd();
+  const runtime = await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: { allow: [cwd], deny: [] }, allowedDomains: [] });
+  t.after(() => runtime.dispose());
+  for (const [command, exitCode, stderr] of [
+    ["grep -q '__pi_approval_probe_no_match_81fb8a__' README.md", 1, ""],
+    ["false", 1, ""],
+    ["printf 'ordinary error\\n' >&2; exit 2", 2, "ordinary error\n"]
+  ] as const) {
+    const markers: string[] = [], diagnostics: string[] = [];
+    const executor = new SelectiveSandboxExecutor({ runtime, cwd, policy: new CapabilityPolicy([], "ask"),
+      onStatus: marker => markers.push(marker), onDiagnostic: details => diagnostics.push(details),
+      approvals: { request: async () => { throw new Error("An ordinary failure must not request approval"); } },
+      runner: {
+        runSandbox: async wrapped => {
+          try { return { ...await exec("/bin/bash", ["-c", wrapped], { cwd, timeout: 15000 }), exitCode: 0 }; }
+          catch (error) {
+            const failed = error as Error & { code: number; stdout: string; stderr: string };
+            if (typeof failed.code !== "number") throw error;
+            return { exitCode: failed.code, stdout: failed.stdout, stderr: failed.stderr };
+          }
+        },
+        runHost: async () => { throw new Error("An ordinary failure must not run on the host"); }
+      }
+    });
+    const output = await executor.execute(command, `ordinary-${exitCode}-${command}`);
+    assert.deepEqual(output, { exitCode, stdout: "", stderr, disposition: "sandbox", violations: [] });
+    assert.deepEqual(markers, []);
+    assert.equal(diagnostics.length, 1);
+    assert.match(diagnostics[0], /waitMs=1000/);
+  }
+});
+
 test("macOS attempts include baseline Mach services even when the shared SDK started without them", { skip: process.platform !== "darwin" }, async t => {
   const cwd = process.cwd();
   await SandboxManager.initialize({ filesystem: { allowRead: [], denyRead: [], allowWrite: [cwd], denyWrite: [] },

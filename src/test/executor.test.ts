@@ -33,6 +33,67 @@ test("ordinary sandbox failure never requests approval", async () => {
   assert.equal(f.calls.elevated, 0);
 });
 
+for (const [command, exitCode] of [
+  ["grep -q '__pi_approval_probe_no_match_81fb8a__' README.md", 1],
+  ["false", 1], ["exit 2", 2], ["exit 126", 126], ["exit 127", 127], ["exit 130", 130]
+] as const) {
+  test(`ordinary failure stays unchanged without diagnostic output: ${command}`, async () => {
+    const f = fixtures();
+    const original = result(exitCode, "output", "ordinary error\n");
+    f.runner.runSandbox = async () => original;
+    let observed = 0, forgotten = false;
+    f.runtime.getViolationsForCommand = () => { observed++; return []; };
+    f.runtime.getObservationDiagnostic = () => {
+      assert.equal(forgotten, false);
+      return { details: "Sandbox observation unconfirmed: private internal counters" };
+    };
+    f.runtime.forgetCommand = () => { forgotten = true; };
+    const markers: string[] = [];
+    const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals,
+      policy: new CapabilityPolicy([]), onStatus: marker => markers.push(marker) });
+    const output = await executor.execute(command, "ordinary-failure");
+    assert.deepEqual(output, { ...original, disposition: "sandbox", violations: [] });
+    assert.equal(observed, 1, "no command or nonzero exit code bypasses violation observation");
+    assert.equal(forgotten, true);
+    assert.deepEqual(markers, []);
+    assert.equal(f.calls.approvals, 0);
+    assert.equal(f.calls.elevated, 0);
+  });
+}
+
+test("debug diagnostics are opt-in, redacted, and separate from command output", async () => {
+  const f = fixtures();
+  const diagnostics: string[] = [];
+  f.runtime.getObservationDiagnostic = () => ({ details: "Sandbox observation unconfirmed: secret" });
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
+    redactor: { redact: text => text.replace(/secret/g, "[REDACTED]") }, onDiagnostic: details => diagnostics.push(details) });
+  const output = await executor.execute("false", "debug-failure");
+  assert.equal(output.stderr, "normal failure");
+  assert.deepEqual(diagnostics, ["Sandbox observation unconfirmed: [REDACTED]"]);
+  assert.equal(f.calls.elevated, 0);
+});
+
+test("observation errors fail closed and still release the command", async () => {
+  const f = fixtures();
+  let forgotten = false;
+  f.runtime.getViolationsForCommand = () => { throw new Error("Invalid observation data"); };
+  f.runtime.forgetCommand = () => { forgotten = true; };
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]) });
+  await assert.rejects(executor.execute("false", "bad-observation"), /Invalid observation data/);
+  assert.equal(forgotten, true);
+  assert.equal(f.calls.approvals, 0);
+  assert.equal(f.calls.elevated, 0);
+});
+
+test("a correlated denial from false still requires explicit approval", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/blocked/file" }]);
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner,
+    approvals: { request: async () => { f.calls.approvals++; return "deny"; } }, policy: new CapabilityPolicy([]) });
+  assert.equal((await executor.execute("false", "false-with-denial")).disposition, "denied");
+  assert.equal(f.calls.approvals, 1);
+  assert.equal(f.calls.elevated, 0);
+});
+
 test("trace observation reaches the existing host replay approval path", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pi-executor-trace-")));
   const writable = join(root, "writable"), blocked = join(root, "blocked");

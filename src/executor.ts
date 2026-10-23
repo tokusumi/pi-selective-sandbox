@@ -4,9 +4,9 @@ import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
-import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
+import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxObservationDiagnostic, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
 
-export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
+export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; onDiagnostic?: (details: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
 const MAX_SANDBOX_APPROVALS = 16;
 const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redactor ? r : { ...r, stdout: redactor.redact(r.stdout), stderr: redactor.redact(r.stderr) };
@@ -29,7 +29,7 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return this.finish(attempt, "sandbox", priorViolations); }
 
       let observed;
-      let observationDiagnostic: string | undefined;
+      let observationDiagnostic: SandboxObservationDiagnostic | undefined;
       try {
         observed = await runtime.getViolationsForCommand(commandId);
         observationDiagnostic = runtime.getObservationDiagnostic?.(commandId);
@@ -37,8 +37,11 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       finally { await runtime.forgetCommand?.(commandId); }
       if (observed.length === 0) {
         if (observationDiagnostic) {
-          this.status("observation-unconfirmed");
-          attempt = { ...attempt, stderr: `${attempt.stderr}${attempt.stderr.endsWith("\n") || !attempt.stderr ? "" : "\n"}${observationDiagnostic}\n` };
+          this.options.onDiagnostic?.(this.options.redactor?.redact(observationDiagnostic.details) ?? observationDiagnostic.details);
+          if (observationDiagnostic.warning) {
+            this.status("observation-unavailable");
+            attempt = { ...attempt, stderr: `${attempt.stderr}${attempt.stderr.endsWith("\n") || !attempt.stderr ? "" : "\n"}${observationDiagnostic.warning}\n` };
+          }
         }
         return this.finish(attempt, "sandbox", priorViolations);
       }
