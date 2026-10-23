@@ -56,6 +56,10 @@ Use `Tab` / `Shift+Tab` to move between fields, arrow keys to select, and `Enter
 
 ## Installation
 
+Requires **Pi 1.4.0 or newer** (Pi 0.85.1 is not supported). Update the host
+Pi first with `pi update`, or with the package manager that installed Pi.
+`pi update --extensions` only updates extensions; it does not upgrade the host.
+
 Install with Pi's normal package installer, then restart Pi:
 
 ```sh
@@ -288,6 +292,23 @@ npm ci
 npm run check
 npm test
 ```
+
+The development Pi packages are kept together at `^1.4.0`, and host-provided
+Pi peers require `>=1.4.0`. Pi 0.85.1 ships a shrinkwrap that pins vulnerable
+`brace-expansion` and `undici` versions; `npm audit fix` and root overrides do
+not update those entries. Update the development packages together and commit
+the regenerated `package-lock.json`. This fixes the checkout's dependency tree,
+not the host Pi installation: users must also upgrade the host as described
+above. See [installed-update verification](docs/dependency-update-verification.md)
+for the managed Git installation checks.
+
+`npm audit` still reports the unpatched `node-forge` advisory inherited from the
+pinned sandbox SDK. See [the follow-up draft](docs/node-forge-audit-follow-up.md).
+Do not use `npm audit fix --force`: its suggested SDK downgrade invalidates the
+required telemetry patch. Install-script approval warnings are separate from
+vulnerability reports; review them in the installation that emitted them rather
+than approving all scripts. The reported `@ast-grep/cli` and `koffi` packages are
+not dependencies of this project.
 
 For **local macOS only**, `macos_sandbox_test` runs the fixed OS-integration
 group from this development checkout after a fresh, once-only human approval.

@@ -52,15 +52,27 @@ test("package manifest exposes the compiled Pi extension", async () => {
   const manifest = await import("../../package.json", { with: { type: "json" } });
   assert.deepEqual(manifest.default.pi.extensions, ["./src/pi-extension.ts"]);
   assert.equal(manifest.default.private, true);
+  assert.deepEqual(manifest.default.peerDependencies, {
+    "@earendil-works/pi-ai": ">=1.4.0",
+    "@earendil-works/pi-coding-agent": ">=1.4.0",
+    "@earendil-works/pi-tui": ">=1.4.0"
+  });
 });
 
 test("whole-result redaction protects a token split across streamed chunks", () => {
   const chunk1 = "ghp_";
   const chunk2 = "A".repeat(36);
-  const result = redactToolResult({ content: [{ type: "text", text: chunk1 + chunk2 }] });
+  const original = { content: [{ type: "text", text: chunk1 + chunk2 }],
+    structuredContent: { output: chunk1 + chunk2, exit_code: 7, truncated: false }, isError: true };
+  const result = redactToolResult(original);
   const text = result.content[0].text ?? "";
-  assert.doesNotMatch(text, /ghp_A/);
+  assert.doesNotMatch(JSON.stringify(result), /ghp_A/);
   assert.match(text, /\[REDACTED:GitHub Token\]/);
+  assert.equal(result.structuredContent.output, text);
+  assert.equal(result.structuredContent.exit_code, 7);
+  assert.equal(result.structuredContent.truncated, false);
+  assert.equal(result.isError, true);
+  assert.equal(original.structuredContent.output, chunk1 + chunk2);
 });
 
 test("executor-generated fail-closed messages are emitted to Pi", () => {
@@ -187,6 +199,12 @@ test("on/off toggles all tool boundaries, retains redaction, and resets on reloa
   const signal = new AbortController().signal;
   const target = join(base, "file.txt");
   const execute = (name: string, params: unknown, onUpdate: Parameters<ToolDefinition["execute"]>[3] = () => {}) => tools.get(name)!.execute(name, params, signal, onUpdate, context);
+  // Pi 1.4 returns nonzero shell exits as error results, not rejected promises.
+  const expectBashFailure = async (command: string, message: RegExp) => {
+    const result = await execute("bash", { command });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), message);
+  };
   await selectiveSandboxExtension(api as never);
   const command = commands.get("selective-sandbox")!;
   for (const args of ["", "invalid", "off extra"]) {
@@ -195,7 +213,9 @@ test("on/off toggles all tool boundaries, retains redaction, and resets on reloa
     await assert.rejects(execute("write", { path: target, content: "before" }), /Permission denied/);
   }
   await assert.rejects(readFile(target));
-  await assert.rejects(execute("bash", { command: "printf sandbox-off" }), /host execution was not attempted/);
+  const blockedTarget = join(base, "must-not-run");
+  await expectBashFailure(`printf sandbox-off; touch '${blockedTarget}'`, /host execution was not attempted/);
+  await assert.rejects(readFile(blockedTarget));
   assert.equal(initialize.mock.callCount(), 1);
 
   await command.handler(" off ", context);
@@ -208,14 +228,14 @@ test("on/off toggles all tool boundaries, retains redaction, and resets on reloa
   const output = await execute("bash", { command: `printf 'ghp_%s' '${"A".repeat(36)}'` }, update => { updates.push(update); });
   assert.match(JSON.stringify(output.content), /REDACTED:GitHub Token/);
   assert.doesNotMatch(JSON.stringify([output, ...updates]), /ghp_A/);
-  await assert.rejects(execute("bash", { command: "exit 7" }), /code 7/);
+  await expectBashFailure("exit 7", /code 7/);
   assert.equal(initialize.mock.callCount(), 1);
 
   await command.handler("on", context);
   assert.match(notices.at(-1)!, /enabled for bash, write, and edit/);
   await assert.rejects(execute("write", { path: target, content: "no" }), /Permission denied/);
   await assert.rejects(execute("edit", { path: target, edits: [{ oldText: "after", newText: "no" }] }), /Permission denied/);
-  await assert.rejects(execute("bash", { command: "printf sandbox-on" }), /host execution was not attempted/);
+  await expectBashFailure("printf sandbox-on", /host execution was not attempted/);
   assert.equal(await readFile(target, "utf8"), "after");
   await command.handler("off", context);
   await selectiveSandboxExtension(api as never);
