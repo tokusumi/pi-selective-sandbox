@@ -45,8 +45,12 @@ export function minimalWriteRoots(capabilities: readonly Capability[]): Capabili
     other.kind === "filesystem.write" && other.resource !== capability.resource && pathContains(other.resource, capability.resource)));
 }
 
-export function redactToolResult<T extends { content: readonly { type: string; text?: string }[] }>(result: T): T {
-  return { ...result, content: result.content.map(item =>
+export function redactToolResult<T extends { content: readonly { type: string; text?: string }[]; structuredContent?: unknown }>(result: T): T {
+  // Pi 1.4 also exposes bash output to programmatic callers as structured data.
+  const structured = result.structuredContent;
+  const redactedStructured = structured && typeof structured === "object" && "output" in structured && typeof structured.output === "string"
+    ? { structuredContent: { ...structured, output: redact_text(structured.output).redacted } } : {};
+  return { ...result, ...redactedStructured, content: result.content.map(item =>
     item.type === "text" && typeof item.text === "string" ? { ...item, text: redact_text(item.text).redacted } : item
   ) } as T;
 }
