@@ -327,6 +327,14 @@ expose the tool. From a normal host terminal, the same group is available as
 it never skips the tests or disables a sandbox. This subset does not replace
 `npm test`; the full-suite command and CI workflow are unchanged.
 
+The tool resolves an executable Node interpreter before requesting approval.
+It prefers the running Pi's `process.execPath`; if that executable was removed
+(for example, by a Homebrew upgrade), it resolves `node` from absolute PATH
+entries. The prompt and execution use the same canonical absolute path, not a
+later shell lookup. Missing interpreters fail before approval. If the selected
+interpreter changes while approval is pending, execution is refused and a fresh
+request is required. No candidate is executed before approval.
+
 The SDK is pinned to `0.0.76`. `npm ci` applies
 `patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
 Git and checking exact SDK file hashes before and after application. Do not
