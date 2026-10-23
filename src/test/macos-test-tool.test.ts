@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createMacOSTestTool, isLocalMacOS } from "../macos-test-tool.js";
 
 const approval = "Run macOS integration tests once on host";
@@ -37,6 +37,22 @@ async function fixture(t: TestContext) {
   const context = { cwd, hasUI: true, ui: { select } };
   const execute = (params = {}) => tool.execute("test-id", params, controller.signal, undefined, context as never);
   return { cwd, tool, calls, context, controller, execute };
+}
+
+function runtimeEnvironment(t: TestContext, execPath: string, path: string) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, "execPath")!;
+  const previousPath = process.env.PATH;
+  Object.defineProperty(process, "execPath", { ...descriptor, value: execPath });
+  process.env.PATH = path;
+  t.after(() => {
+    Object.defineProperty(process, "execPath", descriptor);
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+  });
+}
+async function executable(path: string) {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, "fixture interpreter: never executed\n", { mode: 0o755 });
+  return path;
 }
 
 test("the local macOS path excludes Linux and every CI invocation", t => {
@@ -157,6 +173,100 @@ test("a runner symlink retargeted while approval is pending requires a new reque
     return approval;
   };
   await assert.rejects(f.execute(), /changed during approval/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("a removed Node execPath falls back to a canonical executable from absolute PATH entries", async t => {
+  const f = await fixture(t);
+  const binary = await executable(join(f.cwd, "version ' current", "node"));
+  const bin = join(f.cwd, "stable-bin");
+  await mkdir(bin);
+  await symlink(binary, join(bin, "node"));
+  runtimeEnvironment(t, join(f.cwd, "removed-version", "node"), bin);
+  const command = `'${binary.replaceAll("'", "'\\''")}' ${script}`;
+  f.context.ui.select = async title => {
+    assert.ok(title.includes(command), "approval must show the canonical fallback, not a shell PATH lookup");
+    return approval;
+  };
+  await f.execute();
+  assert.equal(f.calls[0][2], command);
+});
+
+test("an existing Node execPath takes precedence over a different PATH interpreter", async t => {
+  const f = await fixture(t);
+  const binary = await executable(join(f.cwd, "current", "node"));
+  const other = await executable(join(f.cwd, "other", "node"));
+  runtimeEnvironment(t, binary, dirname(other));
+  await f.execute();
+  assert.equal(f.calls[0][2], `'${binary}' ${script}`);
+});
+
+test("missing Node with only empty or relative PATH entries fails before approval", async t => {
+  const f = await fixture(t);
+  runtimeEnvironment(t, join(f.cwd, "removed", "node"), ":.:relative-bin");
+  f.context.ui.select = async () => { throw new Error("No executable means no approval prompt"); };
+  await assert.rejects(f.execute(), /Cannot find an executable Node runtime/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("Node resolution skips non-executable files and directories", async t => {
+  const f = await fixture(t);
+  const nonExecutable = await executable(join(f.cwd, "not-executable", "node"));
+  await chmod(nonExecutable, 0o644);
+  const directory = join(f.cwd, "not-file", "node");
+  await mkdir(directory, { recursive: true });
+  const binary = await executable(join(f.cwd, "valid", "node"));
+  runtimeEnvironment(t, nonExecutable, [dirname(directory), dirname(binary)].join(":"));
+  await f.execute();
+  assert.equal(f.calls[0][2], `'${binary}' ${script}`);
+});
+
+test("Node symlink retargeting during approval cannot change the approved executable", async t => {
+  const f = await fixture(t);
+  const first = await executable(join(f.cwd, "first", "node"));
+  const second = await executable(join(f.cwd, "second", "node"));
+  const bin = join(f.cwd, "bin"), link = join(bin, "node");
+  await mkdir(bin);
+  await symlink(first, link);
+  runtimeEnvironment(t, join(f.cwd, "removed", "node"), bin);
+  f.context.ui.select = async () => {
+    await unlink(link);
+    await symlink(second, link);
+    return approval;
+  };
+  await assert.rejects(f.execute(), /Node runtime changed during approval/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("replacing a Node executable in place during approval requires a new request", async t => {
+  const f = await fixture(t);
+  const binary = await executable(join(f.cwd, "bin", "node"));
+  runtimeEnvironment(t, binary, "");
+  f.context.ui.select = async () => { await writeFile(binary, "replacement interpreter\n"); return approval; };
+  await assert.rejects(f.execute(), /Node runtime changed during approval/);
+  assert.equal(f.calls.length, 0);
+});
+
+test("losing the original Node during approval cannot silently approve a PATH fallback", async t => {
+  const f = await fixture(t);
+  const original = await executable(join(f.cwd, "original", "node"));
+  const fallback = await executable(join(f.cwd, "fallback", "node"));
+  runtimeEnvironment(t, original, dirname(fallback));
+  f.context.ui.select = async () => { await unlink(original); return approval; };
+  await assert.rejects(f.execute(), /Node runtime changed during approval/);
+  assert.equal(f.calls.length, 0);
+  f.context.ui.select = async title => { assert.ok(title.includes(fallback)); return approval; };
+  await f.execute();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0][2], `'${fallback}' ${script}`);
+});
+
+test("removing the interpreter during approval never starts host execution", async t => {
+  const f = await fixture(t);
+  const binary = await executable(join(f.cwd, "bin", "node"));
+  runtimeEnvironment(t, binary, "");
+  f.context.ui.select = async () => { await unlink(binary); return approval; };
+  await assert.rejects(f.execute(), /Cannot find an executable Node runtime/);
   assert.equal(f.calls.length, 0);
 });
 

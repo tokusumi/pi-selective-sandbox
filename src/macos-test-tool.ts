@@ -1,5 +1,6 @@
-import { readFile, realpath } from "node:fs/promises";
-import { join, relative, isAbsolute } from "node:path";
+import { constants } from "node:fs";
+import { access, readFile, realpath, stat } from "node:fs/promises";
+import { delimiter, join, relative, isAbsolute } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { createBashTool, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -28,6 +29,27 @@ async function checkout(cwd: string): Promise<{ cwd: string; script: string }> {
   return { cwd: canonical, script: target };
 }
 
+// Homebrew can remove process.execPath while Pi is still running. Resolve a
+// replacement only from absolute PATH entries, never via shell lookup or cwd.
+// Do not execute candidates before approval, even to ask for their version.
+async function nodeRuntime(): Promise<{ path: string; identity: string }> {
+  const candidates = [process.execPath, ...(process.env.PATH ?? "").split(delimiter)
+    .flatMap(entry => isAbsolute(entry) ? [join(entry, "node")] : [])];
+  for (const candidate of new Set(candidates)) {
+    if (!isAbsolute(candidate)) continue;
+    try {
+      const path = await realpath(candidate);
+      const info = await stat(path, { bigint: true });
+      if (!info.isFile()) continue;
+      await access(path, constants.X_OK);
+      return { path, identity: [info.dev, info.ino, info.mode, info.size, info.mtimeNs, info.ctimeNs].join(":") };
+    } catch (error) {
+      if (!["ENOENT", "ENOTDIR", "EACCES", "ELOOP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
+  }
+  throw new Error("Cannot find an executable Node runtime; host execution was not started.");
+}
+
 /** A separate, once-only host authority, never a fallback from ordinary bash. */
 export function createMacOSTestTool(runHost: MacOSTestRunner): ToolDefinition<typeof parameters> {
   let busy = false;
@@ -48,7 +70,8 @@ export function createMacOSTestTool(runHost: MacOSTestRunner): ToolDefinition<ty
       busy = true;
       try {
         const target = await checkout(context.cwd);
-        const command = `'${process.execPath.replaceAll("'", "'\\''")}' ${script}`;
+        const runtime = await nodeRuntime();
+        const command = `'${runtime.path.replaceAll("'", "'\\''")}' ${script}`;
         guard();
         const choice = await context.ui.select("Run local macOS integration tests outside the agent sandbox?"
           + "\n\nExact command:\n" + command + "\n\nCanonical working directory:\n" + target.cwd
@@ -59,6 +82,10 @@ export function createMacOSTestTool(runHost: MacOSTestRunner): ToolDefinition<ty
         if (choice !== approve) throw new Error("macOS host tests were not approved; host execution was not started.");
         const current = await checkout(context.cwd);
         if (current.cwd !== target.cwd || current.script !== target.script) throw new Error("The checkout changed during approval; host execution was not started.");
+        const currentRuntime = await nodeRuntime();
+        if (currentRuntime.path !== runtime.path || currentRuntime.identity !== runtime.identity) {
+          throw new Error("The Node runtime changed during approval; host execution was not started. Request fresh approval.");
+        }
         guard();
         return await runHost(id, target.cwd, command, signal, onUpdate);
       } finally {
