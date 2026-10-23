@@ -10,8 +10,8 @@ import { AnthropicSandboxRuntime, sandboxCommandKey, sandboxInitializationError,
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { CapabilityPolicy } from "../policy.js";
 
-for (const monitorState of ["running", "error", "exited"] as const) {
-  test(`missing first filesystem event is diagnosed with ${monitorState} monitoring, without approval or host replay`, async t => {
+for (const monitorState of ["running", "starting", "error", "exited", "stopped", "recovered"] as const) {
+  test(`missing denial details stay debug-only with ${monitorState} monitoring, without approval or host replay`, async t => {
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { ...platform, value: "darwin" });
     const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
@@ -19,9 +19,10 @@ for (const monitorState of ["running", "error", "exited"] as const) {
     syncBuiltinESMExports();
     const store = new SandboxViolationStore();
     const stop = startMacOSSandboxLogMonitor(event => store.addViolation(event));
-    child.emit("spawn");
-    if (monitorState === "error") child.emit("error", Object.assign(new Error("not permitted"), { code: "EPERM" }));
+    if (monitorState !== "starting") child.emit("spawn");
+    if (monitorState === "error" || monitorState === "recovered") child.emit("error", Object.assign(new Error("not permitted"), { code: "EPERM" }));
     if (monitorState === "exited") child.emit("exit", 1, null);
+    if (monitorState === "stopped") stop();
     t.mock.method(SandboxManager, "initialize", async () => {});
     t.mock.method(SandboxManager, "reset", async () => {});
     t.mock.method(SandboxManager, "getSandboxViolationStore", () => store);
@@ -43,10 +44,14 @@ for (const monitorState of ["running", "error", "exited"] as const) {
       subscribed();
       return () => { listeners--; unsubscribe(); };
     });
-    const markers: string[] = [];
+    const markers: string[] = [], diagnostics: string[] = [];
     let sandboxCalls = 0;
-    const executor = new SelectiveSandboxExecutor({ runtime, onStatus: marker => markers.push(marker), policy: new CapabilityPolicy([], "ask"),
-      runner: { runSandbox: async () => { sandboxCalls++; return { exitCode: 1, stdout: "", stderr: "open EPERM /not-evidence.txt" }; },
+    const executor = new SelectiveSandboxExecutor({ runtime, onStatus: marker => markers.push(marker), onDiagnostic: details => diagnostics.push(details), policy: new CapabilityPolicy([], "ask"),
+      runner: { runSandbox: async () => {
+        sandboxCalls++;
+        if (monitorState === "recovered") child.emit("spawn");
+        return { exitCode: 1, stdout: "", stderr: "open EPERM /not-evidence.txt" };
+      },
         runHost: async () => { throw new Error("Missing logs must not run on the host"); } },
       approvals: { request: async () => { throw new Error("stderr EPERM is not a permission resource"); } }
     });
@@ -60,11 +65,22 @@ for (const monitorState of ["running", "error", "exited"] as const) {
     assert.equal(listeners, 0);
     assert.equal(sandboxCalls, 1);
     assert.equal(runtime.logMonitorEnabled, true, "process failures never change the configured flag");
-    assert.match(result.stderr, /Sandbox observation unconfirmed/);
-    assert.match(result.stderr, /matchingEvents=1/);
-    assert.match(result.stderr, new RegExp(`"state":"${monitorState}"`));
-    assert.match(result.stderr, /EPERM alone does not identify/);
-    assert.deepEqual(markers, ["<sandbox: observation-unconfirmed>"]);
+    assert.equal(diagnostics.length, 1);
+    assert.match(diagnostics[0], /Sandbox observation unconfirmed/);
+    assert.match(diagnostics[0], /matchingEvents=1/);
+    assert.match(diagnostics[0], /waitMs=1000; configured=true/);
+    assert.match(diagnostics[0], new RegExp(`"state":"${monitorState === "recovered" ? "error" : monitorState}"`));
+    assert.match(diagnostics[0], /EPERM alone does not identify/);
+    assert.doesNotMatch(result.stderr, /key=|matchingEvents=|monitorAtStart=|Sandbox observation unconfirmed/);
+    if (monitorState === "running") {
+      assert.equal(result.stderr, "open EPERM /not-evidence.txt");
+      assert.deepEqual(markers, []);
+    } else {
+      assert.match(result.stderr, /^open EPERM \/not-evidence.txt\nSandbox log monitoring is unavailable or was interrupted/);
+      assert.match(result.stderr, /host execution was not attempted/);
+      assert.match(result.stderr, /NODE_DEBUG=pi-selective-sandbox/);
+      assert.deepEqual(markers, ["<sandbox: observation-unavailable>"]);
+    }
     assert.equal(runtime.getObservationDiagnostic(id), undefined, "forgetCommand removes per-attempt diagnostics");
   });
 }

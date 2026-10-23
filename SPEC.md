@@ -185,7 +185,17 @@ prompt discloses all observed targets). Approval then streams `<sandbox: approve
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
 Only the final selected attempt determines the tool exit code; denial retains
 the latest sandbox exit code. Ordinary failures and sandbox successes have no
-status marker.
+status marker. On macOS, missing correlated denials alone must not change a failed
+command's output. Observation details (including command keys, monitor snapshots,
+and counters) are diagnostic-only and available on process stderr through
+`NODE_DEBUG=pi-selective-sandbox`, after configured redaction. A known unavailable
+or interrupted monitor instead adds a short `<sandbox: observation-unavailable>`
+warning; it never infers a permission, offers approval, disables enforcement, or
+replays on the host. An apparently running monitor is not proof of complete OS
+telemetry. The adapter retains a bounded one-second post-exit wait for delayed
+supported denials and finishes immediately if one is already available or arrives.
+Command names, nonzero exit codes, unrelated invocations, and unsupported events
+must not bypass or shorten observation.
 
 The command has already been attempted before a replay choice; each retry can
 repeat side effects permitted before the violation. A command with a write on

@@ -183,6 +183,9 @@ test("macOS waits for the matching SDK event, not another invocation", async t =
   await Promise.resolve();
   assert.equal(settled, false, "sysctl noise is not a resource capability");
   assert.equal(listeners, 1);
+  t.mock.timers.tick(999);
+  await Promise.resolve();
+  assert.equal(settled, false, "even late matching denials retain the full observation window");
   record("git-add", "git(123) deny(1) file-write-create /repo/.git/index.lock");
   const violations = await pending;
   assert.equal(violations[0].resource, "/repo/.git/index.lock");
@@ -200,11 +203,18 @@ test("macOS ordinary failures stop waiting and release the subscription", async 
     const unsubscribe = subscribe(listener);
     return () => { listeners--; unsubscribe(); };
   });
-  const pending = runtime.getViolationsForCommand("ordinary-failure");
+  let settled = false;
+  const pending = runtime.getViolationsForCommand("ordinary-failure").then(result => { settled = true; return result; });
   assert.equal(listeners, 1);
-  t.mock.timers.tick(1000);
+  t.mock.timers.tick(999);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
   assert.deepEqual(await pending, []);
   assert.equal(listeners, 0);
+  assert.match(runtime.getObservationDiagnostic("ordinary-failure")!.details, /waitMs=1000/);
+  await runtime.forgetCommand("ordinary-failure");
+  assert.equal(runtime.getObservationDiagnostic("ordinary-failure"), undefined);
 });
 
 test("Ubuntu release detection accepts all versions and excludes other distributions", () => {

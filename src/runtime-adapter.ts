@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { WritePolicy } from "./filesystem-policy.js";
 import { StraceViolationObserver, STRACE_ARGS, STRACE_BINARY } from "./strace-observer.js";
-import type { SandboxRuntime, SandboxViolation } from "./types.js";
+import type { SandboxObservationDiagnostic, SandboxRuntime, SandboxViolation } from "./types.js";
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
@@ -15,6 +15,9 @@ export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead
 // Exact OS services for certificate verification, native process listing and
 // directory notifications. These daemons are a trusted baseline, not host replay.
 const MACOS_BASELINE_MACH_SERVICES = ["com.apple.trustd.agent", "com.apple.sysmond", "com.apple.FSEvents"] as const;
+// Unified log delivery is asynchronous. Keep the full post-exit window even
+// after unrelated or unsupported events; neither proves a denial cannot follow.
+const MACOS_DENIAL_WAIT_MS = 1000;
 
 // Foreground children share a process. Jiti reloads may instantiate another
 // copy of this module, so both SDK ownership and leases must be process-wide.
@@ -134,7 +137,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   private readonly strace = new Map<string, StraceViolationObserver>();
   private disposed = false;
   private readonly namespace: string;
-  private readonly observationDiagnostics = new Map<string, string>();
+  private readonly observationDiagnostics = new Map<string, SandboxObservationDiagnostic>();
   private readonly monitorAtStart = new Map<string, ReturnType<typeof getMacOSSandboxLogMonitorStatus>>();
   private commandKey(id: string): string { return sandboxCommandKey(this.namespace, id); }
   private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {
@@ -253,7 +256,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
             if (result.length > 0 || deadline) finish(result);
           } catch (error) { finish([], error); }
         };
-        const timer = setTimeout(() => check(true), 1000);
+        const timer = setTimeout(() => check(true), MACOS_DENIAL_WAIT_MS);
         try {
           unsubscribe = store.subscribe(() => check());
           // subscribe delivers the current store synchronously as well.
@@ -265,14 +268,20 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       const key = this.commandKey(commandId);
       const matchingEvents = store.getViolationsForCommand(key).length;
       const monitor = monitorStatus();
-      this.observationDiagnostics.set(commandId,
-        `Sandbox observation unconfirmed: key=${key}; waitMs=${this.logMonitorEnabled ? 1000 : 0}; configured=${this.logMonitorEnabled}; matchingEvents=${matchingEvents}; monitorAtStart=${JSON.stringify(this.monitorAtStart.get(commandId) ?? null)}; monitor=${JSON.stringify(monitor)}. ` +
-        "No supported denial was observed before the deadline. EPERM alone does not identify a permission resource; no permission was inferred and host execution was not attempted. Compare this key with an independent host log capture and check the monitor state and counters.");
+      const atStart = this.monitorAtStart.get(commandId);
+      const failedAtStart = atStart && ["error", "exited", "stopped"].includes(atStart.state);
+      this.observationDiagnostics.set(commandId, {
+        details: `Sandbox observation unconfirmed: key=${key}; waitMs=${this.logMonitorEnabled ? MACOS_DENIAL_WAIT_MS : 0}; configured=${this.logMonitorEnabled}; matchingEvents=${matchingEvents}; monitorAtStart=${JSON.stringify(atStart ?? null)}; monitor=${JSON.stringify(monitor)}. ` +
+          "No supported denial was observed before the deadline. EPERM alone does not identify a permission resource; no permission was inferred and host execution was not attempted. Compare this key with an independent host log capture and check the monitor state and counters.",
+        ...(monitor.state !== "running" || failedAtStart ? {
+          warning: "Sandbox log monitoring is unavailable or was interrupted; denial observation may be incomplete. No permission was inferred and host execution was not attempted. Enable NODE_DEBUG=pi-selective-sandbox for details."
+        } : {})
+      });
     }
     return observer ? [...upstream, ...await observer.getViolations()] : upstream;
   }
 
-  getObservationDiagnostic(commandId: string): string | undefined {
+  getObservationDiagnostic(commandId: string): SandboxObservationDiagnostic | undefined {
     return this.observationDiagnostics.get(commandId);
   }
 

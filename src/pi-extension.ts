@@ -1,6 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { debuglog } from "node:util";
 import { isBroadGitParent, requestEscalationApproval, type ApprovalProject } from "./escalation-approval.js";
 import type { EscalationUI } from "./widening-dialog.js";
 import { dirname, join } from "node:path";
@@ -27,6 +28,7 @@ import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
 
+const debug = debuglog("pi-selective-sandbox");
 type ApprovalUI = EscalationUI;
 
 async function runCommand(local: BashOperations, command: string, cwd: string, options: Parameters<BashOperations["exec"]>[2]): Promise<CommandResult> {
@@ -274,6 +276,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               },
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
               onStatus: marker => emitSandboxStatus(marker, options.onData),
+              onDiagnostic: details => debug("%s", details),
               redactor: { redact: text => redact_text(text).redacted }
             });
             const output = await executor.execute(command, id);

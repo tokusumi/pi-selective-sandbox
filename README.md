@@ -235,7 +235,14 @@ On macOS, SDK log monitoring is explicitly enabled. SDK stream events supply
 command-correlated denials; filesystem resources are read from raw event data,
 not sanitized presentation text. After a failed command, the adapter waits up
 to one second for a matching supported SDK event before returning an ordinary
-failure without approval.
+failure without approval. A missing denial is not itself a sandbox error: ordinary
+failures keep their exit code and output without an observation status marker.
+Start Pi with `NODE_DEBUG=pi-selective-sandbox` to send detailed observation keys,
+monitor snapshots, and counters to process stderr (not the bash tool transcript).
+A known unavailable/interrupted monitor still produces a short
+`<sandbox: observation-unavailable>` warning, without granting permissions or
+running on the host. The one-second post-exit window is retained for delayed OS
+events; command names, exit codes, and unrelated/unsupported events never shorten it.
 
 If the SDK initialization flag `enableLogMonitor` is explicitly `false` on
 macOS, enforcement is forced off for all three tools before executing an enabled
