@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import fs from "node:fs/promises";
 import http from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { syncBuiltinESMExports } from "node:module";
 import { SandboxManager, SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
 import { AnthropicSandboxRuntime, buildSandboxRuntimeConfig, isUbuntuRelease, sandboxInitializationError, sandboxCommandKey } from "../runtime-adapter.js";
@@ -66,10 +70,13 @@ test("Linux does not enable the SDK startup-policy monitor", async t => {
   });
   const initialize = t.mock.method(SandboxManager, "initialize", async () => {});
   const settings = { cwd: "/worktree", writePolicy: { allow: ["/worktree"], deny: [] } };
-  await AnthropicSandboxRuntime.initialize(settings);
+  const runtime = await AnthropicSandboxRuntime.initialize(settings);
   assert.deepEqual(initialize.mock.calls.map(call => call.arguments), [
     [buildSandboxRuntimeConfig(settings), undefined, false]
   ]);
+  const wrap = t.mock.method(SandboxManager, "wrapWithSandbox", async (command: string) => command);
+  assert.equal(await runtime.wrap("printf unchanged", { commandId: "linux-no-proxy", commandText: "printf unchanged" }), "printf unchanged");
+  assert.equal(wrap.mock.calls.at(-1)!.arguments[0], "printf unchanged");
 });
 
 test("write denials offer resource widening for ordinary and subagent tool IDs", async t => {
@@ -312,6 +319,41 @@ test("network telemetry distinguishes proxy allowlist targets from socket and ad
   }
 });
 
+
+test("macOS disables credential helpers only for each attempt's proxy and preserves existing Git parameters", async t => {
+  const { runtime } = await macOSFixture(t);
+  t.after(() => runtime.dispose());
+  const cwd = await fs.mkdtemp(join(tmpdir(), "proxy-credential-config-"));
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+  const exec = promisify(execFile);
+  const existing = "'http.proxyAuthMethod=basic' 'credential.helper=fixture-helper' 'user.name=fixture user'";
+  const originalEnvironment = process.env.GIT_CONFIG_PARAMETERS;
+  const wrap = t.mock.method(SandboxManager, "wrapWithSandbox", async (...args: Parameters<typeof SandboxManager.wrapWithSandbox>) => args[0]);
+  const ports: number[] = [];
+  for (let index = 0; index < 2; index++) {
+    const id = `proxy-credential-config-${index}`;
+    const command = 'printf "%s" "$GIT_CONFIG_PARAMETERS"';
+    const wrapped = await runtime.wrap(command, { commandId: id, commandText: command });
+    t.after(() => runtime.forgetCommand(id));
+    const call = wrap.mock.calls.at(-1)!.arguments;
+    const options = call[4];
+    const proxy = options && Reflect.get(options, "networkProxy") as { port: number };
+    assert.ok(proxy);
+    ports.push(proxy.port);
+    assert.equal(options?.commandText, command, "Attribution must retain the user's exact command");
+    const env = { ...process.env, GIT_CONFIG_PARAMETERS: existing, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_CEILING_DIRECTORIES: cwd };
+    const { stdout } = await exec("/bin/bash", ["-c", wrapped], { cwd, env });
+    assert.equal(stdout, `${existing} 'credential.http://localhost:${proxy.port}.helper='`);
+    const gitEnv = { ...env, GIT_CONFIG_PARAMETERS: stdout };
+    const helperFor = async (url: string) => (await exec("git", ["config", "--get-urlmatch", "credential.helper", url], { cwd, env: gitEnv })).stdout.trim();
+    assert.equal(await helperFor(`http://localhost:${proxy.port}`), "");
+    assert.equal(await helperFor("https://example.invalid/repository"), "fixture-helper");
+    assert.equal(await helperFor(`https://localhost:${proxy.port}`), "fixture-helper");
+    assert.equal(await helperFor(`http://localhost:${proxy.port === 65535 ? 65534 : proxy.port + 1}`), "fixture-helper");
+  }
+  assert.notEqual(ports[0], ports[1]);
+  assert.equal(process.env.GIT_CONFIG_PARAMETERS, originalEnvironment, "No process-global Git settings may change");
+});
 
 test("macOS attempts enforce immutable network grants in separate authenticated proxies", async t => {
   const { runtime } = await macOSFixture(t);
