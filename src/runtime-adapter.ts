@@ -184,9 +184,15 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       proxy = await createCommandNetworkProxy(this.commandKey(context.commandId), [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], sharedRuntime().manager);
       this.proxies.set(context.commandId, proxy);
     }
+    // Git approves proxy credentials after successful HTTP requests too. Keep
+    // this attempt's ephemeral token out of credential helpers without changing
+    // origin helpers or persistent config. Append after the SDK sets its env.
+    const sandboxCommand = proxy
+      ? `export GIT_CONFIG_PARAMETERS="\${GIT_CONFIG_PARAMETERS:+$GIT_CONFIG_PARAMETERS }'credential.http://localhost:${proxy.port}.helper='"\n${command}`
+      : command;
     let wrapped: string;
     try {
-      wrapped = await sharedRuntime().manager.wrapWithSandbox(command, undefined, {
+      wrapped = await sharedRuntime().manager.wrapWithSandbox(sandboxCommand, undefined, {
         filesystem: { allowWrite: [...policy.allow, ...extraWrites], allowRead: [...(this.settings.allowRead ?? [])], denyRead: [], denyWrite: [...policy.deny] },
         // A foreground sibling may have initialized the shared SDK with a
         // different policy. Preserve this session's local-binding setting and
