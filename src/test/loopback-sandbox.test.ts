@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
+import net from "node:net";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -113,3 +114,95 @@ test("macOS local binding opt-out denies ephemeral IPv4 and IPv6 listeners", { s
     } finally { await runtime.forgetCommand(id); }
   }
 });
+
+for (const first of [true, false]) {
+  test(`macOS shared runtimes enforce local binding in ${first} -> ${!first} order`, { skip: process.platform !== "darwin" }, async t => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "pi-binding-")));
+    const cwd = join(base, "workspace"), blocked = join(base, "blocked");
+    await Promise.all([mkdir(cwd), mkdir(blocked)]);
+    const servers: (http.Server | net.Server)[] = [];
+    t.after(async () => {
+      await AnthropicSandboxRuntime.reset();
+      await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+      await rm(base, { recursive: true, force: true });
+    });
+    // Only dedicated local fixtures are reachable; never probe unrelated services.
+    const endpoints: { host: string; port: number }[] = [];
+    for (const host of ["127.0.0.1", "::1"]) {
+      const server = http.createServer((_req, res) => res.end("fixture-ok"));
+      servers.push(server);
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, host, resolve); });
+      endpoints.push({ host, port: (server.address() as net.AddressInfo).port });
+    }
+    const socketPath = join(cwd, "host.sock");
+    // macOS rejects oversized Unix socket paths with EINVAL before Seatbelt.
+    // Reuse a fixed-length bind path no longer than the working host fixture.
+    const bindSocketPath = join(cwd, "deny.sock");
+    assert.ok(Buffer.byteLength(bindSocketPath) < 104, "Unix socket fixture must fit sockaddr_un");
+    const unix = net.createServer(socket => socket.end());
+    servers.push(unix);
+    await new Promise<void>((resolve, reject) => { unix.once("error", reject); unix.listen(socketPath, resolve); });
+    const runtimes: AnthropicSandboxRuntime[] = [];
+    for (const allowLocalBinding of [first, !first]) {
+      runtimes.push(await AnthropicSandboxRuntime.initialize({ cwd, allowedDomains: [], allowLocalBinding,
+        writePolicy: { allow: [cwd], deny: [blocked] } }, false));
+    }
+    let sequence = 0;
+    const run = async (index: number, command: string, resource?: string) => {
+      const id = `shared-${sequence++}`;
+      const runtime = runtimes[index];
+      try {
+        const wrapped = await runtime.wrap(command, { commandId: id, commandText: command,
+          extraCapabilities: resource ? [{ kind: "network", resource }] : [] });
+        for (const rule of [
+          '(allow network-bind (local ip "*:*"))',
+          '(allow network-inbound (local ip "*:*"))',
+          '(allow network-outbound (remote ip "localhost:*"))'
+        ]) assert.equal(wrapped.includes(rule), index === 0 ? first : !first, rule);
+        assert.doesNotMatch(wrapped, /\(allow network\*\)|\(allow system-socket \(socket-domain AF_UNIX\)\)/);
+        return await runSandbox(wrapped, cwd);
+      } finally { await runtime.forgetCommand(id); }
+    };
+    const expectOutput = async (index: number, source: string, expected: string) => {
+      const result = await run(index, node(source));
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(result.stdout.trim(), expected, source);
+    };
+    // Alternate both live runtimes, then retry each without resetting the SDK.
+    for (const index of [0, 1, 0, 1]) {
+      const allowed = index === 0 ? first : !first;
+      for (const host of ["127.0.0.1", "::1", "0.0.0.0", "::"]) {
+        await expectOutput(index, `const s = require("node:net").createServer();
+          s.on("error", e => console.log(e.code));
+          s.listen(0, ${JSON.stringify(host)}, () => { console.log("listening"); s.close() });`, allowed ? "listening" : "EPERM");
+      }
+      for (const { host, port } of endpoints) {
+        await expectOutput(index, `const s = require("node:net").connect(${port}, ${JSON.stringify(host)});
+          s.on("connect", () => { console.log("connected"); s.destroy() });
+          s.on("error", e => console.log(e.code));`, allowed ? "connected" : "EPERM");
+      }
+      await expectOutput(index, `try { require("node:fs").writeFileSync(${JSON.stringify(join(blocked, "file"))}, "no");
+        console.log("unexpected write") } catch(e) { console.log(e.code) }`, "EPERM");
+      await expectOutput(index, `const s = require("node:net").createServer();
+        s.on("error", e => console.log(e.code));
+        s.listen(${JSON.stringify(bindSocketPath)}, () => { console.log("unexpected bind"); s.close() });`, "EPERM");
+      await expectOutput(index, `const s = require("node:net").connect(${JSON.stringify(socketPath)});
+        s.on("connect", () => { console.log("unexpected connect"); s.destroy() });
+        s.on("error", e => console.log(e.code));`, "EPERM");
+      const { port } = endpoints[0];
+      const resource = `127.0.0.1:${port}`;
+      const curl = `/usr/bin/curl --noproxy '' -fsS --max-time 3 http://${resource}/`;
+      // Proxy filtering still applies even when direct loopback is allowed.
+      assert.notEqual((await run(index, curl)).exitCode, 0);
+      for (const command of [curl, `${curl} --proxy "$ALL_PROXY"`]) {
+        const result = await run(index, command, resource);
+        assert.equal(result.exitCode, 0, result.stderr);
+        assert.equal(result.stdout, "fixture-ok");
+      }
+      assert.notEqual((await run(index, curl)).exitCode, 0, "per-attempt grant must not leak into the next proxy");
+    }
+    await runtimes[0].dispose();
+    await expectOutput(1, `const s = require("node:net").createServer(); s.on("error", e => console.log(e.code));
+      s.listen(0, "127.0.0.1", () => { console.log("listening"); s.close() });`, !first ? "listening" : "EPERM");
+  });
+}
