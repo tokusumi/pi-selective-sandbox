@@ -117,7 +117,7 @@ test("macOS local binding opt-out denies ephemeral IPv4 and IPv6 listeners", { s
 
 for (const first of [true, false]) {
   test(`macOS shared runtimes enforce local binding in ${first} -> ${!first} order`, { skip: process.platform !== "darwin" }, async t => {
-    const base = await realpath(await mkdtemp(join(tmpdir(), "pi-shared-binding-")));
+    const base = await realpath(await mkdtemp(join(tmpdir(), "pi-binding-")));
     const cwd = join(base, "workspace"), blocked = join(base, "blocked");
     await Promise.all([mkdir(cwd), mkdir(blocked)]);
     const servers: (http.Server | net.Server)[] = [];
@@ -135,6 +135,10 @@ for (const first of [true, false]) {
       endpoints.push({ host, port: (server.address() as net.AddressInfo).port });
     }
     const socketPath = join(cwd, "host.sock");
+    // macOS rejects oversized Unix socket paths with EINVAL before Seatbelt.
+    // Reuse a fixed-length bind path no longer than the working host fixture.
+    const bindSocketPath = join(cwd, "deny.sock");
+    assert.ok(Buffer.byteLength(bindSocketPath) < 104, "Unix socket fixture must fit sockaddr_un");
     const unix = net.createServer(socket => socket.end());
     servers.push(unix);
     await new Promise<void>((resolve, reject) => { unix.once("error", reject); unix.listen(socketPath, resolve); });
@@ -181,7 +185,7 @@ for (const first of [true, false]) {
         console.log("unexpected write") } catch(e) { console.log(e.code) }`, "EPERM");
       await expectOutput(index, `const s = require("node:net").createServer();
         s.on("error", e => console.log(e.code));
-        s.listen(${JSON.stringify(join(cwd, `child-${sequence}.sock`))}, () => { console.log("unexpected bind"); s.close() });`, "EPERM");
+        s.listen(${JSON.stringify(bindSocketPath)}, () => { console.log("unexpected bind"); s.close() });`, "EPERM");
       await expectOutput(index, `const s = require("node:net").connect(${JSON.stringify(socketPath)});
         s.on("connect", () => { console.log("unexpected connect"); s.destroy() });
         s.on("error", e => console.log(e.code));`, "EPERM");
