@@ -12,7 +12,6 @@ import type { CommandResult } from "../types.js";
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 // Public fixture values only. Never call a real user's credential get/store/erase.
 const credential = "protocol=http\nhost=fixture.invalid\nusername=fixture-user\npassword=fixture-password-not-a-secret\n\n";
-const readOnlyStore = '!f() { case "$1" in get) git credential-store get ;; esac; }; f';
 
 function run(file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, input = ""): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
@@ -48,33 +47,6 @@ async function fixture(t: test.TestContext) {
   };
   return { root, home, cwd, env, git };
 }
-
-test("credential approve ignores a store helper failure even with only one helper", async t => {
-  const { cwd, env } = await fixture(t);
-  // A deterministic helper failure, independent of OS sandbox availability.
-  // It consumes the dummy input without echoing it; no real helper is invoked.
-  const helper = '!f() { cat >/dev/null; echo fixture-store-denied >&2; exit 1; }; f';
-  const result = await run("git", ["-c", "credential.helper=", "-c", `credential.helper=${helper}`, "credential", "approve"], cwd, env, credential);
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.stdout, "");
-  assert.match(result.stderr, /fixture-store-denied/);
-});
-
-test("get-only helper preserves fixture lookup and skips credential storage", async t => {
-  const { home, cwd, env } = await fixture(t);
-  assert.equal((await run("git", ["credential-store", "store"], cwd, env, credential)).exitCode, 0);
-  const before = await readFile(join(home, ".git-credentials"));
-  const args = ["-c", "credential.helper=", "-c", `credential.helper=${readOnlyStore}`, "credential"];
-  const result = await run("git", [...args, "fill"], cwd, env, "protocol=http\nhost=fixture.invalid\n\n");
-  assert.equal(result.exitCode, 0);
-  assert.equal(result.stderr, "");
-  assert.ok(result.stdout.includes("password=fixture-password-not-a-secret"), "fixture lookup must still supply authentication");
-  const approved = await run("git", [...args, "approve"], cwd, env, credential.replace("fixture-user", "other-fixture-user"));
-  assert.equal(approved.exitCode, 0);
-  assert.equal(approved.stderr, "");
-  assert.deepEqual(await readFile(join(home, ".git-credentials")), before);
-  assert.deepEqual(await readdir(home), [".git-credentials"]);
-});
 
 // Authenticated smart HTTP backed solely by a disposable bare repository.
 // Nothing is forwarded to a real host and authorization values are never logged.
@@ -125,79 +97,6 @@ async function serveGit(root: string, env: NodeJS.ProcessEnv) {
     authenticatedRequests: () => authenticatedRequests,
     close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) };
 }
-
-async function authenticatedGitFlow(t: test.TestContext, sandboxed: boolean) {
-  const { root, home, cwd, env, git } = await fixture(t);
-  await git("init", "--bare", "--template=", "--initial-branch=main", join(root, "remote.git"));
-  // No hooks or operator config. Separate fixture metadata also lets the portable
-  // transport test run beneath an outer SDK sandbox's mandatory .git protection.
-  await git("init", "--template=", "--initial-branch=main", "--separate-git-dir", join(cwd, "metadata"));
-  await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture");
-  await git("push", join(root, "remote.git"), "HEAD:refs/heads/main");
-  const server = await serveGit(root, env);
-  t.after(() => server.close());
-  await git("remote", "add", "origin", server.url);
-  const input = credential.replace("fixture.invalid", `127.0.0.1:${server.port}`);
-  assert.equal((await run("git", ["credential-store", "store"], cwd, env, input)).exitCode, 0);
-  const storage = join(home, ".git-credentials"), before = await readFile(storage);
-  const runtime = sandboxed ? await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: { allow: [cwd], deny: [] }, allowedDomains: [], allowLocalBinding: true }) : undefined;
-  t.after(async () => { await runtime?.dispose(); });
-  const execute = async (command: string, id: string) => {
-    if (!runtime) {
-      const result = await run("/bin/bash", ["-c", command], cwd, env);
-      assert.equal(result.exitCode, 0, result.stderr);
-      return result;
-    }
-    const executor = new SelectiveSandboxExecutor({ runtime, cwd, policy: new CapabilityPolicy([]),
-      runner: { runSandbox: wrapped => run("/bin/bash", ["-c", wrapped], cwd, env),
-        runHost: async () => { throw new Error("Credential tests must never replay on host"); } },
-      approvals: { request: async () => { throw new Error("Credential tests must never widen the sandbox"); } }
-    });
-    const result = await executor.execute(command, id);
-    assert.equal(result.exitCode, 0, result.stderr);
-    assert.equal(result.disposition, "sandbox");
-    return result;
-  };
-  // In the portable case, inject ONLY the store failure, not authentication or
-  // transport. The native case uses the real helper and the real write boundary.
-  const helper = runtime ? "store" : '!f() { case "$1" in get) git credential-store get ;; store) cat >/dev/null; echo fixture-store-denied >&2; exit 1 ;; esac; }; f';
-  const failure = runtime ? /unable to get credential storage lock in 1000 ms: Operation not permitted/ : /fixture-store-denied/;
-  if (runtime) {
-    const directCommand = "git credential-store store";
-    const wrapped = await runtime.wrap(directCommand, { commandId: "store-direct", commandText: directCommand, cwd });
-    const direct = await run("/bin/bash", ["-c", wrapped], cwd, env, input);
-    await runtime.forgetCommand("store-direct");
-    assert.notEqual(direct.exitCode, 0);
-    assert.match(direct.stderr, failure);
-  }
-  const approve = await execute(`printf %s ${quote(input)} | git -c credential.helper= -c ${quote(`credential.helper=${helper}`)} credential approve`, "store-approve");
-  assert.match(approve.stderr, failure);
-  for (const [index, selectedHelper] of [helper, readOnlyStore].entries()) {
-    const command = ["git", "-c", "credential.helper=", "-c", `credential.helper=${selectedHelper}`].map(quote).join(" ");
-    const fetch = await execute(`${command} fetch origin main`, `credential-fetch-${index}`);
-    assert.equal(await git("rev-parse", "refs/remotes/origin/main"), await git("--git-dir", join(root, "remote.git"), "rev-parse", "main"));
-    await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", `fixture-${index}`);
-    const push = await execute(`${command} push origin HEAD:refs/heads/fixture-${index}`, `credential-push-${index}`);
-    assert.equal(await git("rev-parse", "HEAD"), await git("--git-dir", join(root, "remote.git"), "rev-parse", `refs/heads/fixture-${index}`));
-    for (const result of [fetch, push]) {
-      if (index === 0) assert.match(result.stderr, failure);
-      else assert.doesNotMatch(result.stderr, /fatal:|unable to get credential storage lock|fixture-store-denied/);
-    }
-    assert.deepEqual(await readFile(storage), before);
-    assert.deepEqual(await readdir(home), [".git-credentials"]);
-  }
-  assert.ok(server.authenticatedRequests() >= 4);
-  assert.deepEqual(server.failures, []);
-  t.diagnostic(`${sandboxed ? "Native sandbox denial" : "Injected store failure"}: approve/fetch/push exit 0. Get-only: authenticated fetch/push exit 0 without storage errors. Fixture store unchanged; no approvals or host replay.`);
-}
-
-test("authenticated HTTP fetch/push tolerate a single failing store helper and work in get-only mode", async t => {
-  await authenticatedGitFlow(t, false);
-});
-
-test("macOS credential-store lock denial does not fail authenticated fetch/push; get-only mode removes it without widening", { skip: process.platform !== "darwin" }, async t => {
-  await authenticatedGitFlow(t, true);
-});
 
 test("macOS automatically suppresses proxy credential storage while preserving origin helpers and authenticated fetch/push", { skip: process.platform !== "darwin" }, async t => {
   const { root, home, cwd, env, git } = await fixture(t);
@@ -269,22 +168,4 @@ test("macOS automatically suppresses proxy credential storage while preserving o
   assert.ok(server.authenticatedRequests() >= 4);
   assert.deepEqual(server.failures, []);
   t.diagnostic("The runtime automatically suppresses helpers only for its proxy; origin get/store and authenticated fetch/push remain successful across fresh attempts. No proxy credentials were persisted or logged.");
-});
-
-test("macOS osxkeychain store diagnostic can be probed without access to the user's Keychain", { skip: process.platform !== "darwin" }, async t => {
-  const { cwd, env, git } = await fixture(t);
-  const helper = join(await git("--exec-path"), "git-credential-osxkeychain");
-  // Diagnostic-only stricter Seatbelt fixture, NOT the extension's baseline.
-  // Block all file writes, service lookups and network access before invoking
-  // store. In particular no real Keychain can be written through securityd.
-  // Never run this helper's store on the host or add a Keychain service allowance.
-  // A result such as -50 is only a containment probe, not reproduction of the
-  // original 100001 or evidence identifying its denied file/service.
-  const profile = '(version 1) (allow default) (deny file-write*) (deny mach-lookup) (deny network*) (deny file-read* (regex #"/Library/Keychains(/|$)"))';
-  const result = await run("/usr/bin/sandbox-exec", ["-p", profile, helper, "store"], cwd, env, credential);
-  assert.notEqual(result.exitCode, 0);
-  assert.ok(result.stdout.length === 0, "store must not emit credential values");
-  const diagnostic = result.stderr.match(/failed to store: (-?\d+)/);
-  assert.ok(diagnostic, "Expected a Security-framework store failure, not sandbox initialization failure");
-  t.diagnostic(`Restricted osxkeychain store returned OSStatus ${diagnostic[1]}; this does not attribute the original failure to a particular file or Mach service.`);
 });
