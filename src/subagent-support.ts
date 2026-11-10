@@ -1,3 +1,4 @@
+import type { ApprovalDiagnostics } from "./approval-diagnostics.js";
 import { createRequire } from "node:module";
 import { realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -40,7 +41,7 @@ export function validChildSandboxBinding(value: unknown): value is ChildSandboxB
   catch { return false; }
 }
 
-export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: string; loadApi?: () => Promise<RequiredChildApi | undefined> }) {
+export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: string; loadApi?: () => Promise<RequiredChildApi | undefined>; diagnostics?: ApprovalDiagnostics }) {
   let childBinding: ChildSandboxBinding | undefined;
   let parentSessionId: string | undefined;
   let bridge: Awaited<ReturnType<typeof startApprovalBridge>> | undefined;
@@ -73,9 +74,12 @@ export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: st
         }
         if (registration) throw new Error("Parent sandbox registration must be shut down before session replacement");
         parentSessionId = sessionId;
-        bridge = await startApprovalBridge({ root: protectedRoot, parentSessionId: sessionId,
-          select: (title, choices, promptOptions) => context.hasUI && context.sessionManager?.getSessionId() === sessionId
-            ? context.ui!.select(title, choices, promptOptions) : Promise.resolve(undefined) });
+        bridge = await startApprovalBridge({ root: protectedRoot, parentSessionId: sessionId, diagnostics: options.diagnostics, selectIsAdapter: true,
+          select: (title, choices, promptOptions) => {
+            if (!context.hasUI || context.sessionManager?.getSessionId() !== sessionId) return Promise.resolve(undefined);
+            promptOptions.onInvoke?.();
+            return context.ui!.select(title, choices, { signal: promptOptions.signal });
+          } });
         // Resolve relative extra roots in the parent's startup cwd once. The
         // workspace default is still resolved independently in each child cwd.
         const inherited: ConfigLoadResult = config.valid ? { valid: true, config: {

@@ -1,3 +1,4 @@
+import { approvalSelect, auditEvent, lookupResult, lookupStart, sessionPersistence } from "./approval-diagnostics.js";
 import { pathContains, type GitWritePaths } from "./git-write-paths.js";
 import { collapseWriteScopes, validateWideningSelection } from "./resource-selection.js";
 import { displayText, durationLabels, showWideningDialog, type ApprovalDuration, type EscalationUI, type WideningDialogOptions } from "./widening-dialog.js";
@@ -43,8 +44,9 @@ export async function requestEscalationApproval(context: EscalationUI, request: 
   if (context.signal?.aborted) return "deny";
   const sessionId = request.sessionGrantEligible ? context.sessionManager?.getSessionId() : undefined;
   const hostCommand = request.commandIdentity;
-  if (hostCommand && project?.hostGrants && await project.hostGrants.covers(project.projectId, hostCommand)) return "host-allow-project";
-  if (hostCommand && sessionId && hostGrants.covers(sessionId, hostCommand)) return "host-allow-session";
+  const audit = context.approvalAudit;
+  if (lookupResult(audit, "host", "project", hostCommand && project?.hostGrants ? await (lookupStart(audit, "host", "project"), project.hostGrants.covers(project.projectId, hostCommand)) : undefined)) return "host-allow-project";
+  if (lookupResult(audit, "host", "session", hostCommand && sessionId ? (lookupStart(audit, "host", "session"), hostGrants.covers(sessionId, hostCommand)) : undefined)) return "host-allow-session";
   const durations = (capabilities: readonly Capability[]): ApprovalDuration[] => {
     const available: ApprovalDuration[] = ["once"];
     if (isBroadGitParent(capabilities, gitWritePaths)) return available;
@@ -53,11 +55,9 @@ export async function requestEscalationApproval(context: EscalationUI, request: 
     return available;
   };
   const eligible = durations(request.capabilities);
-  if (request.capabilities.length > 0) {
-    if (eligible.includes("project") && project && await project.grants.covers(project.projectId, request.capabilities)) return "sandbox-allow-project";
-    if (eligible.includes("session") && sessionId && grants.covers(sessionId, request.capabilities)) return "sandbox-allow-session";
-  }
-  if (!context.hasUI || !context.ui) return "deny";
+  if (lookupResult(audit, "resource", "project", request.capabilities.length > 0 && eligible.includes("project") && project ? await (lookupStart(audit, "resource", "project"), project.grants.covers(project.projectId, request.capabilities)) : undefined)) return "sandbox-allow-project";
+  if (lookupResult(audit, "resource", "session", request.capabilities.length > 0 && eligible.includes("session") && sessionId ? (lookupStart(audit, "resource", "session"), grants.covers(sessionId, request.capabilities)) : undefined)) return "sandbox-allow-session";
+  if (!context.hasUI || !context.ui) { auditEvent(audit, { event: "provider.skip", outcome: "unavailable", reason: "headless" }); return "deny"; }
   const options: WideningDialogOptions = {
     request, durations, projectId: project?.projectId,
     warnings(capabilities) {
@@ -73,17 +73,19 @@ export async function requestEscalationApproval(context: EscalationUI, request: 
   };
   const choice = request.capabilities.length > 0
     ? await showWideningDialog(context, options)
-    : { action: await context.ui.select(hostOnlySummary(request), ["Run outside sandbox…", "Deny"], { signal: context.signal }) === "Run outside sandbox…" ? "host" as const : "deny" as const };
+    : { action: await approvalSelect(context, "action", hostOnlySummary(request), ["Run outside sandbox…", "Deny"], { signal: context.signal }) === "Run outside sandbox…" ? "host" as const : "deny" as const };
   if (context.signal?.aborted) return "deny";
   if (choice.action === "host") return requestHostApproval(context, request, sessionId, project, hostGrants);
   if (choice.action !== "allow") return "deny";
   if (!durations(choice.capabilities).includes(choice.duration) || !await validateWideningSelection(request.capabilities, choice.capabilities) || context.signal?.aborted) return "deny";
   const capabilities = collapseWriteScopes(choice.capabilities);
   const decision: SandboxApprovalDecision = `sandbox-allow-${choice.duration}`;
+  auditEvent(audit, { event: "approval.selection", authority: "resource", duration: choice.duration, scopes: audit?.diagnostics.scopes(capabilities) });
   if (choice.duration === "project" && project) {
-    try { await project.grants.grant(project.projectId, capabilities); } catch { return "deny"; }
+    try { await project.grants.grant(project.projectId, capabilities); auditEvent(audit, { event: "persist", authority: "resource", duration: "project", outcome: "success", scopes: audit?.diagnostics.scopes(capabilities) }); }
+    catch { auditEvent(audit, { event: "persist", authority: "resource", duration: "project", outcome: "error" }); return "deny"; }
   }
-  if (choice.duration === "session" && sessionId) grants.grant(sessionId, capabilities);
+  if (choice.duration === "session" && sessionId) sessionPersistence(audit, "resource", () => grants.grant(sessionId, capabilities));
   return { decision, capabilities };
 }
 
@@ -94,7 +96,7 @@ async function requestHostApproval(context: EscalationUI, request: EscalationApp
   const available: ApprovalDuration[] = ["once"];
   if (command && sessionId) available.push("session");
   if (command && project?.hostGrants) available.push("project");
-  const chosen = await context.ui.select("Run outside sandbox — duration", available.map(value => durationLabels[value]), { signal: context.signal });
+  const chosen = await approvalSelect(context, "host-duration", "Run outside sandbox — duration", available.map(value => durationLabels[value]), { signal: context.signal });
   const duration = available.find(value => durationLabels[value] === chosen);
   if (!duration) return "deny";
   const message = [
@@ -107,10 +109,12 @@ async function requestHostApproval(context: EscalationUI, request: EscalationApp
     "", "The entire command will run again and may repeat earlier side effects.",
     "This approval is for the exact command, working directory and execution mode — not a resource permission."
   ].join("\n");
-  if (await context.ui.select(message, ["Run on host", "Deny"], { signal: context.signal }) !== "Run on host" || context.signal?.aborted) return "deny";
+  if (await approvalSelect(context, "host-confirm", message, ["Run on host", "Deny"], { signal: context.signal }) !== "Run on host" || context.signal?.aborted) return "deny";
+  auditEvent(context.approvalAudit, { event: "approval.selection", authority: "host", duration });
   if (duration === "project" && command && project?.hostGrants) {
-    try { await project.hostGrants.grant(project.projectId, command); } catch { return "deny"; }
+    try { await project.hostGrants.grant(project.projectId, command); auditEvent(context.approvalAudit, { event: "persist", authority: "host", duration: "project", outcome: "success" }); }
+    catch { auditEvent(context.approvalAudit, { event: "persist", authority: "host", duration: "project", outcome: "error" }); return "deny"; }
   }
-  if (duration === "session" && sessionId && command) hosts.grant(sessionId, command);
+  if (duration === "session" && sessionId && command) sessionPersistence(context.approvalAudit, "host", () => hosts.grant(sessionId, command));
   return `host-allow-${duration}`;
 }

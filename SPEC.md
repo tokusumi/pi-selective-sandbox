@@ -183,6 +183,13 @@ kind; for mixed denials the marker names the first kind, while the approval
 prompt discloses all observed targets). Approval then streams `<sandbox: approved widen retry>`,
 `<sandbox: approved host-replay>`, or `<sandbox: approval-denied>`. An approved
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
+The `approval-required` marker precedes provider lookup and is **not a UI count**.
+A stored grant can return without a selector, and a single request can invoke
+multiple selectors. Opt-in [approval diagnostics](docs/approval-diagnostics.md)
+separate provider calls, lookup outcomes, selector dispatch/invocation/render,
+responses, grant persistence and observed-target retry correlation. They are
+non-authoritative and best-effort; built-in/RPC invocation does not prove pixel
+visibility. Diagnostic failure must not change decisions or execution order.
 Only the final selected attempt determines the tool exit code; denial retains
 the latest sandbox exit code. Ordinary failures and sandbox successes have no
 status marker. On macOS, missing correlated denials alone must not change a failed
