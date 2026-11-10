@@ -1,4 +1,4 @@
-# 承認診断 v1（opt-in）
+# 承認のセッション記録と追加診断 v1
 
 ## 目的と非目的
 
@@ -6,18 +6,39 @@
 
 この診断は provider、stored-grant lookup、selector、応答、grant 保存、retry を別イベントにする。権限の根拠、監査完全性の保証、host fallback、新しい grant の種類は追加しない。元調査の過去セッションについて、UI 回数や当時の extension revision を遡って確定するものではない。
 
-## 有効化・保存・プライバシー
+## セッション履歴への既定記録
 
-Pi 起動前に `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` を設定する。既定は無効。設定後は reload / 再起動が必要。子プロセスでもこの環境変数が有効なときに子側の診断を記録する。
+更新後に拡張を reload / 再起動すると、通常の Pi セッション JSONL に次の CustomEntry が自動で残る。`pi.appendEntry()` を使い、CustomMessage やモデル向けツール出力本文は追加しない。
 
-保存先は `<getAgentDir()>/pi-selective-sandbox/approvals/diagnostics/<ランダム UUID>.jsonl`。既存の deny-protected approvals root の内側で、workspace や session transcript には記録しない。ファイルは extension instance ごとに exclusive create、0600、ディレクトリは0700。同名ファイルを共有 append しない。安全でないディレクトリ、symlink、書込失敗では診断だけを停止する。診断保存のために保護を緩めたり書込先を変更したりしない。
+- `pi-selective-sandbox:approval-audit:v1`：`data` は下記の安全な診断イベント。
+- `pi-selective-sandbox:approval-audit-status:v1`：`recording`、`truncated`、`write-error` と instance ID、payload byte/event 上限、記録済み量。開始 manifest の features で対応機能を識別できる。
+- bash/write/edit の tool result の `details.selectiveSandboxAudit`：`originId` と HMAC `callId` のみ。イベントと既存 transcript の toolCallId を結ぶための anchor。生の toolCallId を新たなイベントに保存しない。エラー結果も `tool_result` hook で扱う。
+
+既定保存のため環境変数は不要。無効にしたい場合だけ Pi 起動前に `PI_SELECTIVE_SANDBOX_SESSION_AUDIT=0` を設定する。子も同じ既定で記録する。session shutdown で sink を先に閉じ、遅い selector 応答が次のセッションへ混入しないようにする。
+
+instance あたり event payload 合計4 MiB、8,192イベント、1イベント32 KiB、scope/observed/network の各配列128要素が上限。session entry の wrapper と開始/欠測通知は別枠。上限や不正なイベントでは1回の `truncated` 通知を試み、その instance の追加記録を停止する。書込失敗時は `write-error` を試みるが、保存先自体が壊れていればこの通知も残らない。通常の sandbox 成功や初期 grant.load も記録対象なので、長いセッションでは上限に注意する。
+
+保存期間は Pi セッション履歴に従い、この機能が過去のセッションを削除することはない。**導入前・opt-out 中・クラッシュ・欠測で記録されなかった事実は復元できない。** 匿名化されていても時刻、アクセス種別、同一 instance 内の対象の等値関係は残る。セッションの export/共有前に確認する。
+
+```sh
+node scripts/summarize-approval-diagnostics.mjs /path/to/pi.jsonl /path/to/child/session.jsonl
+```
+
+ファイル名ではなく entry の構造でセッションを認識する。古いセッションは `sessionFilesWithoutAudit` として **不明** と報告する。開始 manifest があり承認が0件のセッションとは区別する。`sessionTruncated` / `sessionWriteErrors` / `sessionStatusGaps` も確認する。記録は authorization の根拠でも完全な監査証跡でもない。
+
+## 追加ファイル診断（任意）・共通プライバシー
+
+Pi 起動前に `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` を設定すると、セッション記録とは独立して追加の private JSONL を保存する。この追加ファイルだけが既定無効。設定後は reload / 再起動が必要。子プロセスにも環境変数が渡る場合に子側の private 記録が有効になる。
+
+保存先は `<getAgentDir()>/pi-selective-sandbox/approvals/diagnostics/<ランダム UUID>.jsonl`。既存の deny-protected approvals root の内側で、この追加ファイルは workspace には置かない。セッションの既定記録とは別の保存先である。ファイルは extension instance ごとに exclusive create、0600、ディレクトリは0700。同名ファイルを共有 append しない。安全でないディレクトリ、symlink、書込失敗では診断だけを停止する。診断保存のために保護を緩めたり書込先を変更したりしない。
 
 記録するのは、固定 enum、数値、ランダム ID、capability 種別と一時的な HMAC identity のみ。
 
 - command 本文・command/input digest・tool input・ファイル内容・stdout/stderr・denial message・token/credential・UI title/choices・例外文字列は保存しない。
 - scope（パス / network endpoint）と project identity は、extension instance ごとのランダム鍵による domain-separated HMAC-SHA256。鍵を永続化せず、raw path、hostname、cwd、session ID、bridge nonce を保存しない。raw scope を記録する opt-in は設けない。
 - scope identity は同じ instance 内の完全一致だけを表す。別プロセス / reload 間の equality、path の親子関係、同じコマンドであることは hash から推測しない。host command の hash も保存しない。
-- HMAC でも等値関係、イベント時刻、アクセス種別は機微情報になり得るため、収集は明示 opt-in、共有前に確認する。
+- HMAC でも等値関係、イベント時刻、アクセス種別は機微情報になり得る。最小限のセッション記録は既定有効で opt-out 可、追加ファイルは明示 opt-in。どちらも共有前に確認する。
+- `callId` は toolCallId の別 domain の HMAC。既存結果との相関以外の権限に使わない。固定の network family/reason と exit code を追加するが、任意 hostname・IP・socket path・例外本文は出さない。
 
 保存上限は instance あたり 4 MiB、未完了 queue は256イベント。上限超過は破棄する。各 file write の準備で最終ディレクトリの種別・mode・owner を確認する。初回と、その後の書込時に最大1日おきに、最終更新が7日より古い UUID 名の診断 JSONL だけを削除する。**停止中・無効化後の自動削除や厳密な7日 TTL は保証しない**。不要になったら利用者が診断ディレクトリを削除する。多数 instance の合計容量上限は別途設定していない。
 
@@ -25,7 +46,7 @@ Pi 起動前に `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` を設定する。
 
 ## 相関
 
-全イベントに `version=1`, `emitterId`, `sequence`, `time`, `originId`, `operationId`, `requestId`, `attempt`, `actor`, `tool` を付ける。
+全イベントに `version=1`, `emitterId`, `sequence`, `time`, `originId`, `operationId`, `requestId`, `attempt`, `actor`, `tool` を付ける。新しいローカル要求には HMAC `callId` も付く。旧 child / transport 上限によって相関 metadata が欠ける場合はある。
 
 - `originId`: 診断 instance のランダム ID。scope/project HMAC の equality domain。
 - `operationId`: bash の一回の execute（full command の retry を含む）。native は provider request ごと。
@@ -35,13 +56,13 @@ Pi 起動前に `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` を設定する。
 - `selectorId`: 一つの UI API invocation / child dispatch の ID。一つの request に複数あり得る。
 - 子側は `selector.dispatch`、親側は同じ相関 ID で `selector.open` を記録する。親側の `emitterId` は親 instance、`originId` は子 instance のままである。
 
-bridge の相関 metadata は UUID / 小さい整数 / 固定 enum の allowlist をコピーするだけで、承認には使わない。壊れていても既存 request は拒否しない。既存256 KiB transport 上限を超える場合は metadata **だけ**省略する。metadata がない旧 child / near-limit request は親の診断で相関した UI 回数に含まれない。
+bridge の相関 metadata は UUID / HMAC token / 小さい整数 / 固定 enum の allowlist をコピーするだけで、承認には使わない。壊れていても既存 request は拒否しない。既存256 KiB transport 上限を超える場合は metadata **だけ**省略する。metadata がない旧 child / near-limit request は親の診断で相関した UI 回数に含まれない。
 
 ## イベント
 
 | event | 意味 |
 | --- | --- |
-| `provider.start` | provider 呼出。prepared `scopes` と raw observed targets の HMAC を分離、project は HMAC |
+| `provider.start` | provider 呼出。prepared `scopes` と observed targets の HMAC を分離、project は HMAC。`unavailableReasons` は sandbox widening 不可の固定 enum |
 | `lookup.start` / `lookup` | 実際に評価した stored-grant lookup。`authority=resource / host`, `duration=session / project`, `outcome=hit / miss / skipped / error` |
 | `grant.load` | bash の初回実行へ既存 resource grants を投入するために読んだ集合。duration 別。load は covers lookup ではない |
 | `coverage` | prepared candidate に現在の bash grant が適用されるか。既存の containment / endpoint 完全一致判定を表示する。stored-grant の exact lookup と別物 |
@@ -54,8 +75,10 @@ bridge の相関 metadata は UUID / 小さい整数 / 固定 enum の allowlist
 | `approval.selection` | validation 済み resource scope と duration、または exact-command confirmation 後の host duration。保存前の選択 |
 | `persist` | resource/host と session/project の保存成功・失敗。session はメモリ保存、project は既存 store の保存処理。Once は保存しない |
 | `provider.response` | 最終 allow / deny / aborted / error。allow の authority と duration、選択された scope identity |
-| `attempt.denial` | 今回の observed targets と直前の denial targets の比較 |
+| `attempt.denial` | observed targets と直前の比較。`network` に opaque id、固定 reason/family の分類を追加 |
 | `retry` | widen / host replay、covered-only / policy / limit による抑止、または承認拒否。実行許可の判断は既存処理のまま |
+| `attempt.result` | sandbox / explicit host replay の終了コードと success/error。host runner の例外は error のみ（本文なし） |
+| `operation.end` | 通常 return の最終 disposition と終了コード。host runner 例外も記録。その他の例外や shutdown によって欠ける場合がある |
 
 lookup 順序は host-project → host-session → resource-project → resource-session（native は resource のみ）。最初の hit で short circuit するため、後続にイベントがないことを miss と解釈しない。eligibility がなければ skipped。lookup 自体が throw した場合は error として記録し、元の例外をそのまま伝播する。store が元々内部で read error を空集合扱いする場合は既存の意味で miss となるので、disk 健全性までは証明しない。
 
@@ -68,6 +91,19 @@ lookup 順序は host-project → host-session → resource-project → resource
 - `mixed`: 部分重複、追加または一部消失。
 
 比較は observed target の kind/resource 完全一致で、prepared Git/parent scope や選択された ancestor とは別。same は「許可を忘れた」証拠ではない。covered telemetry なら再承認せず終わる場合もある。新しい別の tool invocation は別 operation であり、上記 relation は引き継がない（同じ origin の scope identity は比較可能）。
+
+## ネットワーク分類
+
+`attempt.denial.network[].reason` は observer の correlated violation からだけ分類する。コマンド本文や stdout/stderr の文字列から原因を推測しない。
+
+- `proxy-allowlist`：proxy が exact endpoint を allowlist 外として拒否。
+- `proxy-address-guard`：proxy の resolved-address guard の拒否。
+- `proxy-host-invalid`：proxy の malformed host 拒否。
+- `unix-socket`：kernel の network operation と観測された絶対 socket path。
+- `raw-socket`：その他の raw network operation。host:port の許可で直るとは限らない。
+- `unknown`：確証が足りない。DNS や Unix の原因に決め付けない。
+
+family は `github` / `github-actions` / `go` / `aws` / `terraform` / `other` の固定カテゴリだけ。どの raw hostname かを復元する機能ではない。分類が新たな network 許可を与えることもない。`hostFailures` は非ゼロ終了/例外の explicit host attempt、`attemptResults` / `operationResults` は実行場所と結果を分離して集計する。host でも失敗したことは分かるが、denial が業務エラーの原因だったとは証明しない。
 
 ## UI 表示の証拠と集計
 
@@ -86,7 +122,13 @@ node scripts/summarize-approval-diagnostics.mjs \
 - 壊れた行は invalidLines として集計し、知らない値をそのまま出力しない。
 - emitter の sequence 欠落、対応する start/response 不在、grant.load / provider.start のない attempt、親側だけの記録は欠測の可能性。集計は常に best-effort の下限であり、全 session の完全な UI 履歴ではない。
 
-## 検証
+## セッション記録の検証
+
+`src/test/session-audit.test.ts` と `session-audit-summary.test.ts` で、設定なしの実 SessionManager への保存、モデル文脈の不変、失敗結果との opaque link、opt-out、sink 終了後の遅延応答、サイズ/件数上限、書込失敗、秘密値の非保存、network 分類、host 失敗の終了コード、過去セッション・転記・旧 private JSONL の非二重計上を検証する。実 OS sandbox/network の E2E 検証の代替ではない。
+
+## 旧 opt-in 初版の検証記録
+
+以下は今回の既定セッション記録より前の実装時点の記録。
 
 `src/test/approval-telemetry.test.ts` は headless、pre-abort / selecting abort、stored grant hit、resource/host、bash/native、project 保存成功/失敗、lookup 例外、sink throw/reject/書込不能、既存実行順・markers 維持、retry same/new/mixed/covered、bridge timeout、metadata 上限・不正値、custom 初回描画、private JSONL / retention、集計の非二重計上を検証する。既存の executor / widening / native mutation / subagent approval テストも合わせて実行する。
 

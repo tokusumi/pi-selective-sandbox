@@ -322,15 +322,28 @@ Sandbox grant identity is capability plus canonical resource. Host grant identit
 
 Project identity is the canonical Git base directory, shared by all linked worktrees: normally the main worktree directory, or the repository metadata directory for bare repositories and `--separate-git-dir` layouts. Outside Git, it is the canonical startup working directory. It is distinct from the startup working directory used as the default writable root. Resource paths and host-command working directories still require exact matches; a host command approved in one worktree is not automatically approved in another cwd. Moving or cloning a repository does not inherit project grants. Existing approvals keyed to a linked worktree are not migrated; approve them again for the shared project if needed. See [SPEC.md](SPEC.md) for storage invariants and exact matching rules.
 
-## Approval diagnostics (opt-in)
+## Approval history (recorded by default)
 
-`approval-required` markers are **not UI counts**: stored grants can bypass UI,
-while one approval can invoke several selectors. Set
-`PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` before starting Pi for separate
-provider, grant lookup, selector invocation/response, persistence and retry events.
-Diagnostics are best-effort, do not authorize anything, and never store command
-text, input digests, credentials, file contents or raw scope/project paths.
-See [the diagnostic schema, privacy/retention policy and aggregation command](docs/approval-diagnostics.md).
+After updating and reloading the extension, Pi session JSONL automatically records
+safe structured approval facts: grant hits/misses, actual selector invocations,
+network-denial categories, retry decisions and sandbox/host exit codes. No setup
+or repeat of a failed command is needed to inspect a subsequently recorded session:
+
+```sh
+node scripts/summarize-approval-diagnostics.mjs /path/to/pi.jsonl
+```
+
+`approval-required` markers are **not UI counts**. Recording is best-effort and
+bounded, with coverage/loss notices; older sessions without metadata are unknown,
+not proof of zero approvals. Records are custom entries, not LLM messages. They
+contain no commands, raw paths/hosts, URL signatures, credentials or output.
+Opaque IDs only compare within one extension instance; session exports still
+reveal timing and equality, so review them before sharing. To opt out, start Pi
+with `PI_SELECTIVE_SANDBOX_SESSION_AUDIT=0`.
+
+The existing `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` option additionally
+writes private diagnostic JSONL files; it is not required for session history.
+See [schema, privacy, limits and aggregation](docs/approval-diagnostics.md).
 
 ## Development
 

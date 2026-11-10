@@ -2,14 +2,15 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
-import type { ApprovalRequest, Capability } from "./types.js";
+import type { ApprovalRequest, Capability, NetworkDiagnostic, WideningUnavailableReason } from "./types.js";
 import type { EscalationUI } from "./widening-dialog.js";
 
 export type ApprovalCorrelation = { operationId: string; attempt: number; requestId?: string };
-export type ApprovalTrace = ApprovalCorrelation & { requestId: string; originId: string; actor: "parent" | "child"; tool: "bash" | "native" };
+/** callId is an instance-keyed token, never the raw transcript tool-call identifier. */
+export type ApprovalTrace = ApprovalCorrelation & { requestId: string; originId: string; actor: "parent" | "child"; tool: "bash" | "native"; callId?: string };
 export type SelectorTrace = ApprovalTrace & { selectorId: string };
 export type DiagnosticFields = {
-  event: "provider.start" | "provider.skip" | "provider.response" | "lookup.start" | "lookup" | "grant.load" | "coverage" | "approval.selection" | "persist" | "selector.dispatch" | "selector.open" | "selector.render" | "selector.response" | "bridge.response" | "attempt.denial" | "retry";
+  event: "provider.start" | "provider.skip" | "provider.response" | "lookup.start" | "lookup" | "grant.load" | "coverage" | "approval.selection" | "persist" | "selector.dispatch" | "selector.open" | "selector.render" | "selector.response" | "bridge.response" | "attempt.denial" | "retry" | "attempt.result" | "operation.end";
   outcome?: "hit" | "miss" | "skipped" | "success" | "error" | "selected" | "dismissed" | "aborted" | "timeout" | "unavailable" | "deny" | "allow";
   authority?: "resource" | "host";
   duration?: "once" | "session" | "project";
@@ -19,6 +20,11 @@ export type DiagnosticFields = {
   scopes?: { kind: Capability["kind"]; id: string }[];
   observed?: { kind: Capability["kind"]; id: string }[];
   project?: string;
+  network?: NetworkDiagnostic[];
+  unavailableReasons?: readonly WideningUnavailableReason[];
+  execution?: "sandbox" | "host";
+  disposition?: "sandbox" | "host" | "denied" | "sandbox-unavailable";
+  exitCode?: number;
   relation?: "first" | "same" | "new" | "mixed";
   reason?: "headless" | "aborted" | "covered" | "limit" | "policy" | "widen" | "host";
 };
@@ -34,7 +40,8 @@ export function selectorTrace(value: unknown): SelectorTrace | undefined {
     || !Number.isSafeInteger(v.attempt) || v.attempt < 0 || v.attempt > 16
     || !["parent", "child"].includes(v.actor) || !["bash", "native"].includes(v.tool)) return undefined;
   // Copy only known fields, never transport extras.
-  return { operationId: v.operationId, requestId: v.requestId, originId: v.originId, selectorId: v.selectorId, attempt: v.attempt, actor: v.actor, tool: v.tool };
+  return { operationId: v.operationId, requestId: v.requestId, originId: v.originId, selectorId: v.selectorId, attempt: v.attempt, actor: v.actor, tool: v.tool,
+    ...(typeof v.callId === "string" && /^[a-f0-9]{64}$/.test(v.callId) ? { callId: v.callId } : {}) };
 }
 
 /** No raw input, command digest, title, choice, path, session identity or error enters a sink. */
@@ -47,9 +54,9 @@ export class ApprovalDiagnostics {
     const correlation = request.diagnosticContext;
     const valid = correlation && uuid.test(correlation.operationId) && Number.isSafeInteger(correlation.attempt) && correlation.attempt >= 0 && correlation.attempt <= 16;
     return { originId: this.originId, requestId: valid && correlation.requestId && uuid.test(correlation.requestId) ? correlation.requestId : randomUUID(), operationId: valid ? correlation.operationId : randomUUID(),
-      attempt: valid ? correlation.attempt : 0, actor, tool: request.kind === "escalation" ? "bash" : "native" };
+      attempt: valid ? correlation.attempt : 0, actor, tool: request.kind === "escalation" ? "bash" : "native", callId: this.token("call", request.toolCallId) };
   }
-  token(domain: "project" | "scope" | "host", identity: string): string {
+  token(domain: "project" | "scope" | "host" | "call", identity: string): string {
     return createHmac("sha256", this.key).update(domain).update("\0").update(identity).digest("hex");
   }
   scopes(capabilities: readonly Capability[]): NonNullable<DiagnosticFields["scopes"]> {
