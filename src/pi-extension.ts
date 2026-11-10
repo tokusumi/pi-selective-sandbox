@@ -1,3 +1,4 @@
+import { ApprovalDiagnostics, approvalSelect, auditEvent, createDiagnosticFileSink, lookupResult, lookupStart, sessionPersistence, type ApprovalAudit } from "./approval-diagnostics.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -26,7 +27,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentity } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
-import type { ApprovalProvider, Capability, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
+import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
 
 const debug = debuglog("pi-selective-sandbox");
 type ApprovalUI = EscalationUI;
@@ -77,25 +78,26 @@ export function createApprovalProvider(
   grants: SessionGrantStore,
   project?: ApprovalProject,
   hostGrants = new SessionHostCommandGrantStore(),
-  gitWritePaths?: GitWritePaths
+  gitWritePaths?: GitWritePaths,
+  diagnostics?: ApprovalDiagnostics
 ): ApprovalProvider {
-  return {
-    async request(request) {
+  async function decide(request: ApprovalRequest, context: ApprovalUI): Promise<ApprovalResponse> {
       if (context.signal?.aborted) return "deny";
+      const audit = context.approvalAudit;
       if (request.kind === "escalation") return requestEscalationApproval(context, request, grants, project, hostGrants, gitWritePaths);
       // Native tools retain exact, preflight resource approvals (no host execution).
       const broadParent = isBroadGitParent(request.capabilities, gitWritePaths);
       const projectEligible = request.projectGrantEligible === true && project !== undefined && !broadParent;
       const sessionId = request.sessionGrantEligible && !broadParent ? context.sessionManager?.getSessionId() : undefined;
-      if (request.capabilities.length > 0 && projectEligible && await project.grants.covers(project.projectId, request.capabilities)) return "sandbox-allow-project";
-      if (request.capabilities.length > 0 && sessionId && grants.covers(sessionId, request.capabilities)) return "sandbox-allow-session";
-      if (!context.hasUI || !context.ui) return "deny";
+      if (lookupResult(audit, "resource", "project", request.capabilities.length > 0 && projectEligible ? await (lookupStart(audit, "resource", "project"), project.grants.covers(project.projectId, request.capabilities)) : undefined)) return "sandbox-allow-project";
+      if (lookupResult(audit, "resource", "session", request.capabilities.length > 0 && sessionId ? (lookupStart(audit, "resource", "session"), grants.covers(sessionId, request.capabilities)) : undefined)) return "sandbox-allow-session";
+      if (!context.hasUI || !context.ui) { auditEvent(audit, { event: "provider.skip", outcome: "unavailable", reason: "headless" }); return "deny"; }
       const requested = request.capabilities.map(capability => capability.kind + ": " + displayText(capability.resource)).join("\n");
       const choices = ["Allow once", ...(sessionId ? ["Allow for session"] : []), ...(projectEligible ? ["Allow for project"] : []), "Deny"];
       const scope = projectEligible
         ? "\n\nSandbox project approval remembers exactly:\n" + requested + "\n\nfor local project:\n" + displayText(project.projectId) + "\nincluding future Pi sessions."
         : sessionId ? "\n\nSandbox session approval remembers exactly the capability/resource above for the current Pi session." : "";
-      const choice = await context.ui.select("Permission required before this file mutation:\n\n" + displayText(request.command)
+      const choice = await approvalSelect(context, "native", "Permission required before this file mutation:\n\n" + displayText(request.command)
         + "\n\nRequested capability (exact canonical target):\n" + requested
         + "\n\nWhy approval is required: no eligible stored grant matches this exact canonical target."
         + "\nNative write/edit require an exact target match; bash parent-directory approvals are not inherited."
@@ -103,19 +105,53 @@ export function createApprovalProvider(
         + "\nSession/project grants can be reused by write/edit for this same target, and by bash as a sandbox capability."
         + "\n\nNo mutation has occurred yet." + scope, choices, { signal: context.signal });
       if (context.signal?.aborted) return "deny";
+      if (choice === "Allow once" || (choice === "Allow for session" && sessionId) || (choice === "Allow for project" && projectEligible)) auditEvent(audit, { event: "approval.selection", authority: "resource", duration: choice === "Allow once" ? "once" : choice === "Allow for session" ? "session" : "project", scopes: audit?.diagnostics.scopes(request.capabilities) });
       if (choice === "Allow for project" && projectEligible) {
-        try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; } catch { return "deny"; }
+        try { await project.grants.grant(project.projectId, request.capabilities); auditEvent(audit, { event: "persist", authority: "resource", duration: "project", outcome: "success" }); return "sandbox-allow-project"; }
+        catch { auditEvent(audit, { event: "persist", authority: "resource", duration: "project", outcome: "error" }); return "deny"; }
       }
-      if (choice === "Allow for session" && sessionId) { grants.grant(sessionId, request.capabilities); return "sandbox-allow-session"; }
+      if (choice === "Allow for session" && sessionId) { sessionPersistence(audit, "resource", () => grants.grant(sessionId, request.capabilities)); return "sandbox-allow-session"; }
       return choice === "Allow once" ? "sandbox-allow-once" : "deny";
-    }
-  };
+  }
+  return { request(request) {
+    if (!diagnostics) return decide(request, context);
+    let audit: ApprovalAudit;
+    try {
+      const trace = diagnostics.trace(request, context.diagnosticBridge ? "child" : "parent");
+      audit = { diagnostics, trace };
+      diagnostics.emit(trace, { event: "provider.start", scopes: diagnostics.scopes(request.capabilities),
+        observed: request.kind === "escalation" ? diagnostics.scopes(request.observedCapabilities ?? []) : undefined,
+        project: project ? diagnostics.token("project", project.projectId) : undefined });
+    } catch { return decide(request, context); }
+    const { trace } = audit;
+    const pending = decide(request, { ...context, approvalAudit: audit });
+    // Record without replacing the authorization promise or adding an awaited step.
+    void pending.then(response => {
+      const decision = typeof response === "string" ? response : response.decision;
+      const authority = decision.startsWith("host-") ? "host" as const : "resource" as const;
+      const duration = decision.endsWith("-once") ? "once" as const : decision.endsWith("-session") ? "session" as const : decision.endsWith("-project") ? "project" as const : undefined;
+      diagnostics.emit(trace, { event: "provider.response", outcome: context.signal?.aborted ? "aborted" : decision === "deny" ? "deny" : "allow",
+        authority: decision === "deny" ? undefined : authority, duration,
+        scopes: typeof response === "string" ? undefined : diagnostics.scopes(response.capabilities) });
+    }, () => {
+      if (audit.pendingLookup) diagnostics.emit(trace, { event: "lookup", ...audit.pendingLookup, outcome: "error" });
+      diagnostics.emit(trace, { event: "provider.response", outcome: "error" });
+    }).catch(() => {});
+    return pending;
+  } };
 }
 
 /** Pi package entrypoint. Replaces bash plus boundary-aware file mutation tools. */
 export default async function selectiveSandboxExtension(pi: ExtensionAPI, options: { loadSubagentApi?: () => Promise<RequiredChildApi | undefined> } = {}): Promise<void> {
   let cwd = process.cwd();
-  const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi });
+  let protectedRoot: string;
+  let diagnosticFile: ReturnType<typeof createDiagnosticFileSink> | undefined;
+  const diagnostics = process.env.PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS === "1" ? new ApprovalDiagnostics(event => {
+    if (!protectedRoot) return;
+    diagnosticFile ??= createDiagnosticFileSink(join(protectedRoot, "diagnostics"));
+    diagnosticFile.sink(event);
+  }) : undefined;
+  const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi, diagnostics });
   const commandNamespace = randomUUID();
   let enabled = true;
   let monitorDisabled = false;
@@ -150,7 +186,6 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   let loadedConfig: ConfigLoadResult = { valid: true, config: DEFAULT_CONFIG };
   let writePolicy: WritePolicy = { allow: [], deny: [] };
   let gitWritePaths: GitWritePaths | undefined;
-  let protectedRoot: string;
   let setup: Promise<void> | undefined;
   const ensureSetup = async (context?: unknown) => {
     if (subagents.bindingFailed) throw new Error("Child sandbox binding failed; execution is blocked.");
@@ -178,7 +213,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     await setup;
   };
   const approvalContext = (context: ApprovalUI & { cwd?: string }) => subagents.binding && !context.hasUI
-    ? bridgeApprovalContext(context, subagents.binding.bridge) : context;
+    ? bridgeApprovalContext(context, subagents.binding.bridge, { diagnostics }) : context;
   pi.on("session_start", async (_event, context) => {
     await ensureSetup(context);
     await subagents.start(context, loadedConfig, protectedRoot);
@@ -217,7 +252,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     return enabled;
   };
   pi.on("session_shutdown", async () => {
-    try { await subagents.close(); } finally { await runtime?.dispose(); }
+    try { await subagents.close(); } finally { await runtime?.dispose(); void diagnosticFile?.close(); }
   });
   const localOperations = createLocalBashOperations();
   const localBash = createBashTool(cwd, {
@@ -247,10 +282,19 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,
               policy: new CapabilityPolicy([], "ask"),
-              approvals: createApprovalProvider(approvalContext({ ...context, signal: options.signal }), grants, project, hostGrants, gitWritePaths),
+              approvals: createApprovalProvider(approvalContext({ ...context, signal: options.signal }), grants, project, hostGrants, gitWritePaths, diagnostics),
+              diagnostics,
+              diagnosticActor: subagents.binding ? "child" : "parent",
               skills: skills(commandCwd),
               trustedHelpersAutoApprove: true,
-              getSandboxCapabilities: async () => { const sessionId = context.sessionManager?.getSessionId(); const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : []; const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : []; return [...sessionCapabilities, ...projectCapabilities]; },
+              getSandboxCapabilities: async trace => {
+                const sessionId = context.sessionManager?.getSessionId();
+                const sessionCapabilities = sessionId ? grants.capabilities(sessionId) : [];
+                if (trace) diagnostics?.emit(trace, { event: "grant.load", authority: "resource", duration: "session", outcome: sessionId ? "success" : "skipped", scopes: diagnostics.scopes(sessionCapabilities) });
+                const projectCapabilities = project ? await project.grants.capabilities(project.projectId) : [];
+                if (trace) diagnostics?.emit(trace, { event: "grant.load", authority: "resource", duration: "project", outcome: project ? "success" : "skipped", scopes: diagnostics.scopes(projectCapabilities), project: project ? diagnostics.token("project", project.projectId) : undefined });
+                return [...sessionCapabilities, ...projectCapabilities];
+              },
               canonicalizeCapabilities: async capabilities => {
                 const boundary = await MutationBoundary.create(commandCwd, writePolicy);
                 const targets = await Promise.all(capabilities.map(capability => boundary.resolve(capability.resource)));
@@ -298,7 +342,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
       return redactToolResult(output);
     }
   });
-  const approvalProvider = (context: unknown, signal?: AbortSignal) => createApprovalProvider(approvalContext({ ...context as ApprovalUI & { cwd?: string }, signal }), grants, project, hostGrants, gitWritePaths);
+  const approvalProvider = (context: unknown, signal?: AbortSignal) => createApprovalProvider(approvalContext({ ...context as ApprovalUI & { cwd?: string }, signal }), grants, project, hostGrants, gitWritePaths, diagnostics);
   const mutationOptions = { cwd, writePolicy: () => writePolicy, approvals: approvalProvider, isEnabled };
   pi.registerTool(await createBoundaryAwareWriteTool(mutationOptions) as never);
   pi.registerTool(await createBoundaryAwareEditTool(mutationOptions) as never);

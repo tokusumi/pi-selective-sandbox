@@ -39,7 +39,7 @@ failures do not by themselves trigger automatic off.
 - `write` and `edit` are native in-process Pi tools. They enforce an explicit,
   canonical filesystem boundary before invoking the native tool.
 - The resolved default write policy permits the extension startup working
-  directory (the session cwd, not a shared host process cwd), `/tmp`, and the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`).
+  directory (the session cwd, not a shared host process cwd), `/tmp`, the Cargo home (`$CARGO_HOME`, otherwise `~/.cargo`), and the npm/uv/gh/Go cache roots described below.
   Within Cargo home, `bin`, `config`, `config.toml`, `credentials`,
   `credentials.toml`, and `env` are denied. Deny rules take precedence.
 - For bash, when the startup working directory is writable under that policy,
@@ -64,6 +64,19 @@ failures do not by themselves trigger automatic off.
 - The `runtime-home` profile incorporates the runtime's implicit
   `~/.npm/_logs` and `~/.claude/debug` convenience paths into the shared
   policy. Disabling that profile adds explicit denies for both paths.
+- On macOS/Linux, `npm-cache`, `uv-cache`, `gh-cache`, and `go-cache` add
+  independently disableable defaults to that same bash/native policy. npm
+  permits only `<npm cache>/_cacache`; uv/gh use their Unix cache directories;
+  Go permits its OS-specific build cache, module cache and first GOPATH's
+  `pkg/sumdb` tree-head state. Startup environment overrides, OS defaults,
+  canonical safety filtering and exclusions are specified in
+  [Default package-cache write profiles](docs/cache-write-profiles.md).
+  Cache candidates are canonicalized before excluding broad roots and known
+  configuration/authentication/install locations. Unsafe candidates add no
+  allowance or fallback root. Opt-out removes baseline additions, not explicit
+  configuration or other profiles' authority; deny rules always win.
+  These shared writable caches can poison artifacts across projects and host
+  consumers. No host automatic execution or Go network defaults are added.
 
 ## 3. Approval authorities
 
@@ -188,6 +201,13 @@ kind; for mixed denials the marker names the first kind, while the approval
 prompt discloses all observed targets). Approval then streams `<sandbox: approved widen retry>`,
 `<sandbox: approved host-replay>`, or `<sandbox: approval-denied>`. An approved
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
+The `approval-required` marker precedes provider lookup and is **not a UI count**.
+A stored grant can return without a selector, and a single request can invoke
+multiple selectors. Opt-in [approval diagnostics](docs/approval-diagnostics.md)
+separate provider calls, lookup outcomes, selector dispatch/invocation/render,
+responses, grant persistence and observed-target retry correlation. They are
+non-authoritative and best-effort; built-in/RPC invocation does not prove pixel
+visibility. Diagnostic failure must not change decisions or execution order.
 Only the final selected attempt determines the tool exit code; denial retains
 the latest sandbox exit code. Ordinary failures and sandbox successes have no
 status marker. On macOS, missing correlated denials alone must not change a failed

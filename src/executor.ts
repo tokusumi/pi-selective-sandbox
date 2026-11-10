@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { ApprovalDiagnostics, type ApprovalTrace } from "./approval-diagnostics.js";
+import { createHash, randomUUID } from "node:crypto";
 import { validateWideningSelection } from "./resource-selection.js";
 import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
@@ -6,7 +7,7 @@ import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxObservationDiagnostic, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
 
-export type SelectiveSandboxOptions = { runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; onDiagnostic?: (details: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: () => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
+export type SelectiveSandboxOptions = { diagnostics?: ApprovalDiagnostics; diagnosticActor?: "parent" | "child"; runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; onDiagnostic?: (details: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: (trace?: ApprovalTrace) => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
 const MAX_SANDBOX_APPROVALS = 16;
 const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redactor ? r : { ...r, stdout: redactor.redact(r.stdout), stderr: redactor.redact(r.stderr) };
@@ -16,9 +17,14 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     const { runtime, runner, policy, approvals, skills } = this.options;
     if (!runtime) return this.unavailable();
     if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return this.finish(await runner.runHost(command), "host", []);
-    const granted = [...(await this.options.getSandboxCapabilities?.() ?? [])]
+    const diagnostics = this.options.diagnostics;
+    const operationId = diagnostics ? randomUUID() : undefined;
+    const initialTrace: ApprovalTrace | undefined = diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: 0,
+      actor: this.options.diagnosticActor ?? "parent", tool: "bash" } : undefined;
+    const granted = [...(await this.options.getSandboxCapabilities?.(initialTrace) ?? [])]
       .filter(capability => capability.kind !== "network" || runtime.supportsNetworkWidening);
     let commandId = toolCallId;
+    let lastTargets = new Set<string>();
     let approvalsUsed = 0;
     let priorViolations: readonly Capability[] = [];
     for (;;) {
@@ -45,6 +51,14 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
         }
         return this.finish(attempt, "sandbox", priorViolations);
       }
+      const trace: ApprovalTrace | undefined = approvalsUsed === 0 ? initialTrace : diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: approvalsUsed,
+        actor: this.options.diagnosticActor ?? "parent", tool: "bash" } : undefined;
+      const targetIds = diagnostics?.scopes(observed) ?? [];
+      const currentTargets = new Set(targetIds.map(target => target.id));
+      const repeated = [...currentTargets].filter(id => lastTargets.has(id)).length;
+      const relation = lastTargets.size === 0 ? "first" : repeated === currentTargets.size && currentTargets.size === lastTargets.size ? "same" : repeated === 0 ? "new" : "mixed";
+      if (trace) diagnostics!.emit(trace, { event: "attempt.denial", observed: targetIds, relation });
+      lastTargets = currentTargets;
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
       const wideningBlocked = prepared === undefined;
@@ -58,12 +72,22 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       const caps = wideningBlocked ? [] : [...new Map(candidates.map(candidate => [`${candidate.kind}\0${candidate.resource}`, candidate])).values()]
         .filter(candidate => !covered(candidate));
       const uncovered = observed.filter(violation => !covered(violation));
+      if (trace) for (const candidate of candidates) diagnostics!.emit(trace, { event: "coverage", authority: "resource", outcome: covered(candidate) ? "hit" : "miss", scopes: diagnostics!.scopes([candidate]) });
       // Covered telemetry cannot make another retry useful. Unsupported
       // network/read denials can still offer exact-command host replay.
-      if (!wideningBlocked && caps.length === 0 && (uncovered.length === 0 || uncovered.every(violation => violation.kind === "filesystem.write"))) return this.finish(attempt, "sandbox", observed);
+      if (!wideningBlocked && caps.length === 0 && (uncovered.length === 0 || uncovered.every(violation => violation.kind === "filesystem.write"))) {
+        if (trace) diagnostics!.emit(trace, { event: "retry", reason: "covered", outcome: "skipped", relation });
+        return this.finish(attempt, "sandbox", observed);
+      }
       const violations = uncovered.length > 0 ? uncovered : observed;
-      if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) return this.finish(attempt, "denied", violations);
-      if (approvalsUsed >= MAX_SANDBOX_APPROVALS) return this.finish(attempt, "sandbox", violations);
+      if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) {
+        if (trace) diagnostics!.emit(trace, { event: "retry", reason: "policy", outcome: "skipped", relation });
+        return this.finish(attempt, "denied", violations);
+      }
+      if (approvalsUsed >= MAX_SANDBOX_APPROVALS) {
+        if (trace) diagnostics!.emit(trace, { event: "retry", reason: "limit", outcome: "skipped", relation });
+        return this.finish(attempt, "sandbox", violations);
+      }
       const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
       const wideningUnavailableReasons: WideningUnavailableReason[] = [];
       if (caps.length === 0) {
@@ -80,9 +104,10 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       this.status(`approval-required ${violations[0].kind}`);
       // Keep all observed targets for diagnostics: even a stored write grant
       // cannot override a deny root that suppressed the resource candidates.
-      const response = await approvals.request({ kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: observed, wideningUnavailableReasons, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
+      const response = await approvals.request({ diagnosticContext: operationId ? { operationId, attempt: approvalsUsed, requestId: trace?.requestId } : undefined, kind: "escalation", toolCallId, toolName, inputDigest: digest(command), capabilities: caps, observedCapabilities: observed, wideningUnavailableReasons, command, replayWarning: true, sessionGrantEligible: true, projectGrantEligible: true, commandIdentity });
       const decision = typeof response === "string" ? response : response.decision;
       if (decision === "host-allow-once" || decision === "host-allow-session" || decision === "host-allow-project") {
+        if (trace) diagnostics!.emit(trace, { event: "retry", reason: "host", authority: "host", outcome: "allow", relation });
         this.status("approved host-replay");
         const replay = await runner.runHost(command);
         this.status(`replay exit=${replay.exitCode}`);
@@ -90,8 +115,10 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       }
       const selected = typeof response === "string" ? caps : response.capabilities;
       if (decision === "deny" || caps.length === 0 || (typeof response !== "string" && !await validateWideningSelection(caps, selected))) {
+        if (trace) diagnostics!.emit(trace, { event: "retry", outcome: "deny", relation });
         this.status("approval-denied"); return this.finish(attempt, "denied", violations);
       }
+      if (trace) diagnostics!.emit(trace, { event: "retry", reason: "widen", authority: "resource", outcome: "allow", relation, scopes: diagnostics!.scopes(selected) });
       this.status("approved widen retry");
       granted.push(...selected);
       priorViolations = violations;
