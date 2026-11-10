@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { debuglog } from "node:util";
 import { isBroadGitParent, requestEscalationApproval, type ApprovalProject } from "./escalation-approval.js";
-import type { EscalationUI } from "./widening-dialog.js";
+import { displayText, type EscalationUI } from "./widening-dialog.js";
 import { dirname, join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
@@ -90,13 +90,18 @@ export function createApprovalProvider(
       if (request.capabilities.length > 0 && projectEligible && await project.grants.covers(project.projectId, request.capabilities)) return "sandbox-allow-project";
       if (request.capabilities.length > 0 && sessionId && grants.covers(sessionId, request.capabilities)) return "sandbox-allow-session";
       if (!context.hasUI || !context.ui) return "deny";
-      const requested = request.capabilities.map(capability => capability.kind + ": " + capability.resource).join("\n");
+      const requested = request.capabilities.map(capability => capability.kind + ": " + displayText(capability.resource)).join("\n");
       const choices = ["Allow once", ...(sessionId ? ["Allow for session"] : []), ...(projectEligible ? ["Allow for project"] : []), "Deny"];
       const scope = projectEligible
-        ? "\n\nSandbox project approval remembers exactly:\n" + requested + "\n\nfor local project:\n" + project.projectId + "\nincluding future Pi sessions."
+        ? "\n\nSandbox project approval remembers exactly:\n" + requested + "\n\nfor local project:\n" + displayText(project.projectId) + "\nincluding future Pi sessions."
         : sessionId ? "\n\nSandbox session approval remembers exactly the capability/resource above for the current Pi session." : "";
-      const choice = await context.ui.select("Permission required before this file mutation:\n\n" + request.command
-        + "\n\nRequested capability:\n" + requested + "\n\nNo mutation has occurred yet." + scope, choices, { signal: context.signal });
+      const choice = await context.ui.select("Permission required before this file mutation:\n\n" + displayText(request.command)
+        + "\n\nRequested capability (exact canonical target):\n" + requested
+        + "\n\nWhy approval is required: no eligible stored grant matches this exact canonical target."
+        + "\nNative write/edit require an exact target match; bash parent-directory approvals are not inherited."
+        + "\nThis approval covers only the target shown, not its parent, siblings, or descendants."
+        + "\nSession/project grants can be reused by write/edit for this same target, and by bash as a sandbox capability."
+        + "\n\nNo mutation has occurred yet." + scope, choices, { signal: context.signal });
       if (context.signal?.aborted) return "deny";
       if (choice === "Allow for project" && projectEligible) {
         try { await project.grants.grant(project.projectId, request.capabilities); return "sandbox-allow-project"; } catch { return "deny"; }

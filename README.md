@@ -52,7 +52,23 @@ A directory selection allows writes beneath that directory, including unrelated 
 
 Use `Tab` / `Shift+Tab` to move between fields, arrow keys to select, and `Enter` to continue or confirm. `Esc` denies. The selected path is displayed in full below the candidate list. If several scopes are needed, each has its own ancestor selection. RPC clients use successive scope, duration, and confirmation selectors rather than a custom terminal screen. Headless execution still denies requests that have no eligible stored grant.
 
-`Run outside sandbox…` opens a separate host-duration and exact-command confirmation. It does not approve the selected resource. Both resource retry and host replay rerun the entire command and can repeat earlier side effects. Native `write` / `edit` retain their exact-target preflight approval UI; ancestor selection is for bash sandbox widening.
+`Run outside sandbox…` opens a separate host-duration and exact-command confirmation. It does not approve the selected resource. Both resource retry and host replay rerun the entire command and can repeat earlier side effects. Native `write` / `edit` retain their exact-target preflight approval UI; ancestor selection is for bash sandbox widening. Both screens explain this difference; the native screen names the canonical target and explains that no eligible exact grant matches.
+
+### Why does write/edit ask after a bash directory approval?
+
+A saved bash approval for `/outside/cache` permits later **bash sandbox** writes beneath it, including `/outside/cache/new-file`. Native `write` / `edit` still need an **exact canonical target** grant for `/outside/cache/new-file`. The second prompt is not evidence that saving the directory approval failed.
+
+| Saved Session/Project resource | Later operation (same eligible session/project) | Reused? |
+| --- | --- | --- |
+| Bash directory `/outside/cache` | Bash write beneath it | Yes, subject to sandbox deny rules |
+| Bash directory `/outside/cache` | Native write/edit of a child file | No; exact file approval required |
+| Exact file (approved through bash or native) | Native write/edit of that same canonical file | Yes |
+| Native exact file | Bash write of that same file | Applied as a sandbox capability; not its parent or siblings |
+| Native exact file | Native write/edit of a sibling or descendant | No |
+
+`Once` is never saved. Session grants disappear on reload/restart and are not shared with parents or sibling children. Project grants survive reload in the same project identity, including linked worktrees; another project does not inherit them. Project stores are loaded at startup, not continuously refreshed: an already-running session can retain cached approvals until reload. A changed symlink target needs its own exact approval. Configured denies and the private approvals root still take precedence; Git broad-parent approvals remain once-only.
+
+We deliberately retain exact-target native approvals: the existing store records capability + path, not whether an old approval was an explicit directory grant. Treating every saved ancestor as native directory authority would silently broaden historical grants. See [the decision record](docs/native-grant-semantics.md).
 
 ## Installation
 
