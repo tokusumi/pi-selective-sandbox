@@ -138,16 +138,6 @@ for (const duration of ["session", "project"] as const) {
     bashTarget = target;
     if (duration === "session") reloaded.answers.push(target, "Once", "Deny");
     assert.equal((await reloaded.execute("bash", { command: "simulated after reload" })).isError === true, duration === "session");
-    if (duration === "project") {
-      // Removing persisted authority is observed on a fresh load, not by claiming
-      // a live cached store has hot-revocation semantics.
-      await writeFile(join(agent, "pi-selective-sandbox", "project-grants.json"), JSON.stringify({ version: 1, projects: {} }));
-      const revoked = await start();
-      await assert.rejects(revoked.execute("write", { path: leaf, content: "no" }), /Permission denied/);
-      revoked.answers.push(target, "Once", "Deny");
-      assert.equal((await revoked.execute("bash", { command: "simulated revoked" })).isError, true);
-    }
-
     // Another non-Git project cannot use this project's grants.
     const otherCwd = join(base, "other-workspace"); await mkdir(otherCwd);
     const otherProject = await start(otherCwd);
@@ -174,6 +164,18 @@ for (const duration of ["session", "project"] as const) {
     // A historical leaf replaced by a directory gains no native descendants.
     await rm(leaf); await mkdir(leaf);
     await assert.rejects(run.execute("write", { path: join(leaf, "child"), content: "no" }), /Permission denied/);
+
+    if (duration === "project") {
+      // Main's freshness contract applies to existing providers as well as new
+      // ones: quiescent disk removal affects the next native lookup/bash call.
+      await writeFile(join(agent, "pi-selective-sandbox", "project-grants.json"), JSON.stringify({ version: 1, projects: {} }));
+      for (const revoked of [run, reloaded, await start()]) {
+        await assert.rejects(revoked.execute("write", { path: target, content: "no" }), /Permission denied/);
+        bashTarget = target;
+        revoked.answers.push(target, "Once", "Deny");
+        assert.equal((await revoked.execute("bash", { command: "simulated revoked" })).isError, true);
+      }
+    }
 
     // Even a stored broad ancestor cannot authorize the private bridge root.
     bashTarget = join(outside, "root-probe");

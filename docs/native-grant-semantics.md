@@ -41,9 +41,10 @@ application semantics are unchanged.
 
 The original investigation's source/store reproduction was read from
 `ISSUE-9plwyrfb7e/investigation/usage-audit/reproduce-grant-semantics.mjs`.
-It corroborates exact lookup and startup-cache behavior, not historical UI
-screens. Past real UI display history remains unverified and is not needed for
-this decision.
+It corroborates exact lookup and the baseline's startup-cache behavior, not
+historical UI screens. Main's subsequently merged Project-grant freshness fix
+(PR #37) removes that cache: each lookup/new bash invocation reads disk. Past
+real UI display history remains unverified and is not needed for this decision.
 
 ## Expected reuse
 
@@ -53,12 +54,14 @@ this decision.
 | Exact file from either surface | Applied as that sandbox capability | Same canonical file only, shared by write/edit |
 | Once | Current operation only | Current operation only |
 | Session | Owning session only; lost on reload | Same ownership and lifetime |
-| Project | Same project identity after startup load | Same project identity after startup load |
+| Project | Same project identity; fresh disk read per invocation | Same project identity; fresh disk read per lookup |
 
 Different files and changed canonical symlink targets require native approval.
 Child Session approvals are not parent/sibling approvals. Project sharing is
-intentional, including linked worktrees. Removing persisted project grants takes
-effect on a fresh store load; this change does not promise live cache invalidation.
+intentional, including linked worktrees. Completed, quiescent persisted removals
+are reflected in the next lookup/new bash invocation without reload, including
+existing providers. This does not cancel in-flight operations or serialize
+concurrent grant writers; SPEC section 10 describes those limits.
 A sandbox capability does not guarantee that an OS operation will succeed (for
 example, creating an entry may need its parent); it never authorizes host replay.
 
@@ -87,11 +90,12 @@ providers, real session/project stores and real native fixture mutations. It
 simulates only the OS runtime, returning fixed success/failure shell commands;
 it is not an OS sandbox integration test. Coverage includes bash-directory reuse,
 exact-file reuse in both directions, sibling rejection, Session isolation/reload,
-Project persistence/removal on reload, another project, Once expiry, symlink
-retargeting and private-root denial. Existing store, native boundary, resource
+Project persistence and live removal across existing/new providers, another
+project, Once expiry, symlink retargeting and private-root denial. Existing store, native boundary, resource
 selection, Git and runtime tests retain the other security checks.
 
-Validation in this workspace:
+Initial validation before incorporating main's diagnostics, cache profiles and
+Project-grant freshness changes:
 
 - Active LSP diagnostics: no errors in the four changed TypeScript files.
 - `npm run check` and build: passed.
@@ -107,3 +111,15 @@ Validation in this workspace:
 - Fresh-context final `reviewer` run
   `f1556c3a-4431-4d4b-8bc6-145661578377` reported no issues, noting the simulated
   runtime limitation. No acceptance or merge-readiness decision is inferred.
+
+After merging main through `22c99a9` (PRs #35–37):
+
+- Retained the native diagnostic lookup/selector instrumentation alongside the
+  exact-target explanation. Updated this branch's docs and cross-surface removal
+  test to match main's per-lookup Project-grant freshness contract.
+- `npm run check`, build, and 105 focused tests passed, including diagnostics,
+  cache profiles, Project freshness, registered tools and cross-surface reuse.
+- LSP returned no findings but could not confirm clean on recheck; TypeScript
+  compilation above is the confirmed type check.
+- An additional reviewer could not start because host Pi dependencies were
+  unavailable; that review did not run. The OS-validation limitation above remains.

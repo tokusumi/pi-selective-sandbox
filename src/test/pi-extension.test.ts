@@ -9,6 +9,9 @@ import { DEFAULT_WRITE_PROFILES } from "../config.js";
 import { isLocalMacOS } from "../macos-test-tool.js";
 import { AnthropicSandboxRuntime } from "../runtime-adapter.js";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
+import { ProjectGrantStore } from "../project-grants.js";
+import { resolveProjectIdentity } from "../project-identity.js";
+import type { Capability, SandboxRuntime } from "../types.js";
 
 test("Pi entrypoint registers a replacement bash tool", async () => {
   const tools: { name: string }[] = [];
@@ -169,6 +172,45 @@ test("an explicitly false macOS SDK monitor flag forces all tools off and blocks
     await execute("write", { path: target, content: "still off" });
     assert.equal(await readFile(target, "utf8"), "still off");
   }
+});
+
+test("a running extension refreshes project capabilities for each bash invocation", async t => {
+  const base = await mkdtemp(join(tmpdir(), "pi-extension-grant-refresh-"));
+  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = base;
+  t.after(async () => {
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    await rm(base, { recursive: true, force: true });
+  });
+  const attempts: (readonly Capability[])[] = [];
+  const runtime: SandboxRuntime = {
+    wrap: async (command, options) => { attempts.push(options.extraCapabilities ?? []); return command; },
+    getViolationsForCommand: () => []
+  };
+  t.mock.method(AnthropicSandboxRuntime, "initialize", async () => runtime as AnthropicSandboxRuntime);
+  const tools = new Map<string, ToolDefinition>();
+  await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined,
+    registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); }
+  } as never);
+  const cwd = process.cwd();
+  const context = { cwd, hasUI: false } as never;
+  const run = () => tools.get("bash")!.execute("check", { command: "printf sandbox" }, new AbortController().signal, () => {}, context);
+  await run(); // Completes setup before the other session persists anything.
+  assert.deepEqual(attempts.at(-1), []);
+  const path = join(base, "pi-selective-sandbox", "project-grants.json");
+  const store = new ProjectGrantStore(path);
+  const capability: Capability = { kind: "filesystem.write", resource: join(base, "outside") };
+  await store.grant((await resolveProjectIdentity(cwd))!, [capability]);
+  await run();
+  assert.deepEqual(attempts.at(-1), [capability]);
+  await rm(path);
+  await run();
+  assert.deepEqual(attempts.at(-1), []);
+  await writeFile(path, "{broken json");
+  await run();
+  assert.deepEqual(attempts.at(-1), []);
+  assert.equal(attempts.length, 4);
 });
 
 test("on/off toggles all tool boundaries, retains redaction, and resets on reload", async t => {

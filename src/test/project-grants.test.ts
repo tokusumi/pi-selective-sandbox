@@ -107,20 +107,25 @@ test("project approval UI persists before allowing and fails closed when storage
 });
 
 
-test("write project grant is persisted before execution and reused by edit in a new session", async () => {
+test("write project grant is persisted before execution and reused by edit in an already-started session", async () => {
   const base = await mkdtemp(join(tmpdir(), "pi-project-mutation-"));
   const project = join(base, "project"); const outside = join(base, "outside");
   await Promise.all([mkdir(project), mkdir(outside)]);
   const storePath = join(base, "state", "grants.json");
   let prompts = 0; const writeCalls: unknown[] = []; const editCalls: unknown[] = [];
+  const preloaded = new ProjectGrantStore(storePath);
+  await preloaded.load();
+  const future = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "two" } }, new SessionGrantStore(), { projectId: project, grants: preloaded });
   const first = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "one" }, ui: { select: async () => { prompts++; return "Allow for project"; } } }, new SessionGrantStore(), { projectId: project, grants: new ProjectGrantStore(storePath) });
   const writer = await boundaryAwareTool<any>("write", { async execute(_id, params) { writeCalls.push(params); } }, { cwd: project, writableRoots: [project], approvals: first });
   const target = join(outside, "same.txt");
   await writer.execute("write", { path: target, content: "A" }, new AbortController().signal, (() => {}) as never);
-  const future = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "two" } }, new SessionGrantStore(), { projectId: project, grants: new ProjectGrantStore(storePath) });
   const editor = await boundaryAwareTool<any>("edit", { async execute(_id, params) { editCalls.push(params); } }, { cwd: project, writableRoots: [project], approvals: future });
   await editor.execute("edit", { path: target, edits: [{ oldText: "A", newText: "B" }] }, new AbortController().signal, (() => {}) as never);
   assert.equal(prompts, 1); assert.equal(writeCalls.length, 1); assert.equal(editCalls.length, 1);
+  await rm(storePath);
+  await assert.rejects(editor.execute("revoked", { path: target, edits: [{ oldText: "B", newText: "C" }] }, new AbortController().signal, (() => {}) as never));
+  assert.equal(editCalls.length, 1);
 });
 
 test("failed project persistence prevents the mutation side effect", async () => {

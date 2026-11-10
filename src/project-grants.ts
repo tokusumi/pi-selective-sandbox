@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { capabilityKey } from "./capability-key.js";
 import type { Capability } from "./types.js";
@@ -32,17 +33,18 @@ function parseStore(input: string): StoredGrants {
   } catch { return emptyStore(); }
 }
 
-/** User-local, persistent, exact project/capability/resource grants. */
+/** User-local, persistent, exact project/capability/resource grants.
+ * Lookups always read disk: another live Pi session may add or revoke grants.
+ */
 export class ProjectGrantStore {
-  private cache: StoredGrants | undefined;
-
   constructor(readonly storagePath: string) {}
 
-  async load(): Promise<void> { this.cache = await this.readLatest(); }
+  /** Compatibility hook only; lookups never retain this snapshot. */
+  async load(): Promise<void> { await this.readLatest(); }
 
   async covers(projectId: string, capabilities: readonly Capability[]): Promise<boolean> {
     if (capabilities.length === 0) return false;
-    const store = this.cache ?? await this.readAndCache();
+    const store = await this.readLatest();
     const grants = store.projects[projectId];
     if (!grants) return false;
     const keys = new Set(grants.map(capabilityKey));
@@ -50,13 +52,14 @@ export class ProjectGrantStore {
   }
 
   async capabilities(projectId: string): Promise<readonly Capability[]> {
-    const store = this.cache ?? await this.readAndCache();
+    const store = await this.readLatest();
     return (store.projects[projectId] ?? []).map(capability => ({ ...capability }));
   }
 
   async grant(projectId: string, capabilities: readonly Capability[]): Promise<void> {
     if (capabilities.length === 0) return;
-    // Merge newest disk state so another Pi process is not trivially overwritten.
+    // Merge the latest snapshot, not a previous lookup. Overlapping writers
+    // remain last-writer-wins; atomic replacement is not transaction isolation.
     const store = await this.readLatest();
     const current = store.projects[projectId] ?? [];
     const keys = new Set(current.map(capabilityKey));
@@ -65,13 +68,6 @@ export class ProjectGrantStore {
     }
     store.projects[projectId] = current;
     await this.writeAtomically(store);
-    this.cache = store;
-  }
-
-  private async readAndCache(): Promise<StoredGrants> {
-    const store = await this.readLatest();
-    this.cache = store;
-    return store;
   }
 
   private async readLatest(): Promise<StoredGrants> {
@@ -86,9 +82,11 @@ export class ProjectGrantStore {
     const directory = dirname(this.storagePath);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700).catch(() => undefined);
-    const temporary = join(directory, "." + basename(this.storagePath) + "." + process.pid + "." + Date.now() + ".tmp");
-    await writeFile(temporary, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
-    await chmod(temporary, 0o600).catch(() => undefined);
-    await rename(temporary, this.storagePath);
+    const temporary = join(directory, "." + basename(this.storagePath) + "." + randomUUID() + ".tmp");
+    await writeFile(temporary, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    try {
+      await chmod(temporary, 0o600).catch(() => undefined);
+      await rename(temporary, this.storagePath);
+    } finally { await rm(temporary, { force: true }).catch(() => undefined); }
   }
 }
