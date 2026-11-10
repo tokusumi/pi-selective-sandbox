@@ -38,6 +38,8 @@ export type CommandRunner = {
 };
 
 export type SandboxApprovalRequest = {
+  /** Diagnostic only; never participates in authorization. */
+  diagnosticContext?: import("./approval-diagnostics.js").ApprovalCorrelation;
   kind?: "sandbox-capability";
   toolCallId: string;
   toolName: string;

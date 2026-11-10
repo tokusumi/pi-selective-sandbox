@@ -292,6 +292,16 @@ Sandbox grant identity is capability plus canonical resource. Host grant identit
 
 Project identity is the canonical Git base directory, shared by all linked worktrees: normally the main worktree directory, or the repository metadata directory for bare repositories and `--separate-git-dir` layouts. Outside Git, it is the canonical startup working directory. It is distinct from the startup working directory used as the default writable root. Resource paths and host-command working directories still require exact matches; a host command approved in one worktree is not automatically approved in another cwd. Moving or cloning a repository does not inherit project grants. Existing approvals keyed to a linked worktree are not migrated; approve them again for the shared project if needed. See [SPEC.md](SPEC.md) for storage invariants and exact matching rules.
 
+## Approval diagnostics (opt-in)
+
+`approval-required` markers are **not UI counts**: stored grants can bypass UI,
+while one approval can invoke several selectors. Set
+`PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` before starting Pi for separate
+provider, grant lookup, selector invocation/response, persistence and retry events.
+Diagnostics are best-effort, do not authorize anything, and never store command
+text, input digests, credentials, file contents or raw scope/project paths.
+See [the diagnostic schema, privacy/retention policy and aggregation command](docs/approval-diagnostics.md).
+
 ## Development
 
 ```sh

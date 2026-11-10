@@ -1,3 +1,4 @@
+import { selectorTrace, type ApprovalDiagnostics, type SelectorTrace } from "./approval-diagnostics.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, readdir, realpath, rename, rm, unlink, access } from "node:fs/promises";
@@ -11,9 +12,9 @@ const MAX_PENDING = 32;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const control = /[\x00-\x1f\x7f-\x9f]/;
-type SelectionRequest = { version: 1; id: string; parentSessionId: string; nonce: string; childSessionId: string; cwd: string; title: string; choices: string[]; expiresAt: number };
+type SelectionRequest = { diagnostic?: SelectorTrace; version: 1; id: string; parentSessionId: string; nonce: string; childSessionId: string; cwd: string; title: string; choices: string[]; expiresAt: number };
 type SelectionReply = { version: 1; id: string; parentSessionId: string; nonce: string; index: number };
-type Select = (title: string, choices: string[], options: { signal: AbortSignal }) => Promise<string | undefined>;
+type Select = (title: string, choices: string[], options: { signal: AbortSignal; onInvoke?: () => void }) => Promise<string | undefined>;
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const bounded = (value: unknown, length: number): value is string => typeof value === "string" && value.length > 0 && value.length <= length;
 
@@ -54,7 +55,7 @@ function validRequest(value: unknown, binding: ApprovalBridgeBinding, id: string
 }
 
 /** The root is explicitly deny-listed for sandbox/native tools, even beneath a widened ancestor. */
-export async function startApprovalBridge(options: { root: string; parentSessionId: string; select: Select; pollIntervalMs?: number }) {
+export async function startApprovalBridge(options: { root: string; parentSessionId: string; select: Select; pollIntervalMs?: number; diagnostics?: ApprovalDiagnostics; selectIsAdapter?: boolean }) {
   await mkdir(options.root, { recursive: true, mode: 0o700 });
   const directory = await realpath(await mkdtemp(join(options.root, "session-")));
   const binding: ApprovalBridgeBinding = { version: 1, parentSessionId: options.parentSessionId, directory, nonce: randomBytes(32).toString("hex") };
@@ -66,6 +67,8 @@ export async function startApprovalBridge(options: { root: string; parentSession
   const pending = new Map<string, { controller: AbortController; expiresAt: number }>();
   async function serve(id: string, request: SelectionRequest, controller: AbortController) {
     const requestPath = join(directory, `${id}.request.json`);
+    const trace = selectorTrace(request.diagnostic);
+    let opened = false, responded = false;
     const cancelled = new Promise<undefined>(resolve => {
       if (controller.signal.aborted) resolve(undefined);
       else controller.signal.addEventListener("abort", () => resolve(undefined), { once: true });
@@ -75,7 +78,21 @@ export async function startApprovalBridge(options: { root: string; parentSession
       await access(requestPath); // A queued child may have cancelled before its turn.
       if (closed || controller.signal.aborted || request.expiresAt <= Date.now()) return;
       const title = `Subagent sandbox approval\nChild session: ${request.childSessionId}\nWorking directory: ${request.cwd}\n\n${displayText(request.title)}`;
-      const choice = await Promise.race([Promise.resolve().then(() => controller.signal.aborted ? undefined : options.select(title, [...request.choices], { signal: controller.signal })), cancelled]);
+      const choice = await Promise.race([Promise.resolve().then(() => {
+        if (controller.signal.aborted) return undefined;
+        const onInvoke = () => {
+          if (opened) return;
+          opened = true;
+          if (trace) options.diagnostics?.emit(trace, { event: "selector.open", selectorId: trace.selectorId, renderer: "parent" });
+        };
+        // An adapter can skip the UI (e.g. a replaced parent session). Only
+        // that adapter knows whether the final UI API is actually invoked.
+        if (!options.selectIsAdapter) onInvoke();
+        return options.select(title, [...request.choices], { signal: controller.signal, onInvoke });
+      }), cancelled]);
+      responded = true;
+      if (trace && opened) options.diagnostics?.emit(trace, { event: "selector.response", selectorId: trace.selectorId, renderer: "parent",
+        outcome: request.expiresAt <= Date.now() ? "timeout" : controller.signal.aborted ? "aborted" : choice === undefined ? "dismissed" : "selected" });
       if (closed || controller.signal.aborted || request.expiresAt <= Date.now()) return;
       await access(requestPath); // Child cancellation revokes the still-pending request.
       const reply: SelectionReply = { version: 1, id, parentSessionId: binding.parentSessionId, nonce: binding.nonce, index: choice === undefined ? -1 : request.choices.indexOf(choice) };
@@ -87,6 +104,7 @@ export async function startApprovalBridge(options: { root: string; parentSession
     } catch (error) {
       if (!closed && !controller.signal.aborted && (error as NodeJS.ErrnoException).code !== "ENOENT") reportError(error);
     } finally {
+      if (trace && opened && !responded) options.diagnostics?.emit(trace, { event: "selector.response", selectorId: trace.selectorId, renderer: "parent", outcome: "error" });
       controller.abort();
       try { await removeFile(requestPath); } catch (error) { if (!closed) reportError(error); }
       pending.delete(id);
@@ -135,7 +153,7 @@ export async function startApprovalBridge(options: { root: string; parentSession
   };
 }
 
-async function requestSelection(binding: ApprovalBridgeBinding, child: EscalationUI & { cwd?: string }, title: string, choices: string[], options: { signal?: AbortSignal; timeoutMs?: number; pollIntervalMs?: number }): Promise<string | undefined> {
+async function requestSelection(binding: ApprovalBridgeBinding, child: EscalationUI & { cwd?: string }, title: string, choices: string[], options: { signal?: AbortSignal; timeoutMs?: number; pollIntervalMs?: number; diagnostic?: SelectorTrace; diagnostics?: ApprovalDiagnostics }): Promise<string | undefined> {
   const signal = options.signal ?? child.signal;
   if (!validBridgeBinding(binding) || signal?.aborted) return undefined;
   const id = randomUUID();
@@ -143,6 +161,10 @@ async function requestSelection(binding: ApprovalBridgeBinding, child: Escalatio
   const request: SelectionRequest = { ...binding, id, childSessionId: child.sessionManager?.getSessionId() ?? "unknown-child", cwd: child.cwd ?? "", title, choices: [...choices],
     expiresAt: Date.now() + Math.min(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS) };
   if (!validRequest(request, binding, id)) return undefined;
+  const trace = selectorTrace(options.diagnostic);
+  // Diagnostics must not turn a formerly valid near-limit request into a denial.
+  if (trace && Buffer.byteLength(JSON.stringify({ ...request, diagnostic: trace })) <= MAX_BYTES) request.diagnostic = trace;
+  let outcome: "selected" | "dismissed" | "aborted" | "timeout" | "unavailable" = "unavailable";
   try {
     if (await realpath(binding.directory) !== binding.directory) return undefined;
     const alive = await readJson(join(binding.directory, "alive.json"));
@@ -151,11 +173,12 @@ async function requestSelection(binding: ApprovalBridgeBinding, child: Escalatio
     if (signal?.aborted) return undefined;
     return await new Promise<string | undefined>(resolve => {
       let finished = false, checking = false;
-      const finish = (choice?: string) => {
+      const finish = (choice?: string, reason?: typeof outcome) => {
         if (finished) return;
+        outcome = reason ?? (choice === undefined ? "dismissed" : "selected");
         finished = true; clearInterval(timer); clearTimeout(deadline); signal?.removeEventListener("abort", abort); resolve(choice);
       };
-      const abort = () => finish();
+      const abort = () => finish(undefined, signal?.aborted ? "aborted" : "timeout");
       const check = async () => {
         if (finished || checking) return;
         checking = true;
@@ -177,13 +200,14 @@ async function requestSelection(binding: ApprovalBridgeBinding, child: Escalatio
     });
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") reportError(error); return undefined; }
   finally {
+    if (trace) options.diagnostics?.emit(trace, { event: "bridge.response", selectorId: trace.selectorId, renderer: "bridge", outcome: signal?.aborted ? "aborted" : outcome });
     try { await Promise.all([removeFile(requestPath), removeFile(replyPath)]); } catch (error) { reportError(error); }
   }
 }
 
 /** Use built-in selectors (RPC semantics), preserving child-side validation and grant storage. */
-export function bridgeApprovalContext(child: EscalationUI & { cwd?: string }, binding: ApprovalBridgeBinding, options: { timeoutMs?: number; pollIntervalMs?: number } = {}): EscalationUI & { cwd?: string } {
-  return { ...child, mode: "rpc", hasUI: true, ui: {
-    select: (title, choices, promptOptions) => requestSelection(binding, child, title, choices, { ...options, signal: promptOptions?.signal ?? child.signal })
+export function bridgeApprovalContext(child: EscalationUI & { cwd?: string }, binding: ApprovalBridgeBinding, options: { timeoutMs?: number; pollIntervalMs?: number; diagnostics?: ApprovalDiagnostics } = {}): EscalationUI & { cwd?: string } {
+  return { ...child, mode: "rpc", hasUI: true, diagnosticBridge: true, ui: {
+    select: (title, choices, promptOptions) => requestSelection(binding, child, title, choices, { ...options, signal: promptOptions?.signal ?? child.signal, diagnostic: promptOptions?.diagnostic })
   } };
 }

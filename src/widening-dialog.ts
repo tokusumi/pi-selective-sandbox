@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { approvalSelect, auditEvent, type ApprovalAudit, type SelectorTrace } from "./approval-diagnostics.js";
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, SelectList, truncateToWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { ancestorPaths, collapseWriteScopes } from "./resource-selection.js";
@@ -17,7 +19,9 @@ export type EscalationUI = {
   hasUI?: boolean;
   mode?: string;
   signal?: AbortSignal;
-  ui?: Pick<ExtensionUIContext, "select"> & Partial<Pick<ExtensionUIContext, "custom">>;
+  approvalAudit?: ApprovalAudit;
+  diagnosticBridge?: boolean;
+  ui?: { select(title: string, choices: string[], options?: { signal?: AbortSignal; timeout?: number; diagnostic?: SelectorTrace }): Promise<string | undefined> } & Partial<Pick<ExtensionUIContext, "custom">>;
   sessionManager?: { getSessionId(): string };
 };
 
@@ -181,18 +185,21 @@ export async function showWideningDialog(context: EscalationUI, options: Widenin
   if (options.request.capabilities.some(capability => capability.kind === "network")) {
     const selected = options.request.capabilities;
     const available = options.durations(selected);
-    const chosen = await context.ui.select("Permission duration\n\n" + wideningSummary(options, selected, "once"),
+    const chosen = await approvalSelect(context, "duration", "Permission duration\n\n" + wideningSummary(options, selected, "once"),
       available.map(value => durationLabels[value]), { signal: context.signal });
     const duration = available.find(value => durationLabels[value] === chosen);
     if (!duration || context.signal?.aborted) return { action: "deny" };
-    const action = await context.ui.select(wideningSummary(options, selected, duration),
+    const action = await approvalSelect(context, "action", wideningSummary(options, selected, duration),
       ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
     if (context.signal?.aborted) return { action: "deny" };
     if (action === "Allow and retry") return { action: "allow", capabilities: selected, duration };
     return { action: action === "Run outside sandbox…" ? "host" : "deny" };
   }
   if (context.mode === "tui" && context.ui.custom) {
-    return await context.ui.custom<WideningChoice>((tui, theme, _keys, done) => {
+    const selectorId = context.approvalAudit ? randomUUID() : undefined;
+    auditEvent(context.approvalAudit, { event: "selector.open", selectorId, stage: "custom", renderer: "local" });
+    try {
+    const choice = await context.ui.custom<WideningChoice>((tui, theme, _keys, done) => {
       let settled = false;
       const finish = (choice: WideningChoice) => {
         if (settled) return;
@@ -204,23 +211,31 @@ export async function showWideningDialog(context: EscalationUI, options: Widenin
       const component = createWideningDialog(options, theme, () => tui.requestRender(), finish, () => Math.max(2, (tui.terminal?.rows ?? 24) - 4));
       context.signal?.addEventListener("abort", abort, { once: true });
       if (context.signal?.aborted) abort();
-      return { ...component, dispose() { context.signal?.removeEventListener("abort", abort); } };
-    }) ?? { action: "deny" };
+      let rendered = false;
+      return { ...component, render(width) {
+        const lines = component.render(width);
+        if (!rendered) { rendered = true; auditEvent(context.approvalAudit, { event: "selector.render", selectorId, stage: "custom", renderer: "local" }); }
+        return lines;
+      }, dispose() { context.signal?.removeEventListener("abort", abort); } };
+    });
+    auditEvent(context.approvalAudit, { event: "selector.response", selectorId, stage: "custom", renderer: "local", outcome: context.signal?.aborted ? "aborted" : choice === undefined ? "dismissed" : "selected" });
+    return choice ?? { action: "deny" };
+    } catch (error) { auditEvent(context.approvalAudit, { event: "selector.response", selectorId, stage: "custom", renderer: "local", outcome: "error" }); throw error; }
   }
   // RPC cannot render custom terminal components. Preserve the same three decisions with built-in selectors.
   const selected: Capability[] = [];
   for (const target of options.request.capabilities) {
     if (selected.some(scope => pathContains(scope.resource, target.resource))) continue;
     const candidates = ancestorPaths(target.resource);
-    const choice = await context.ui.select(`Allow write access in sandbox\n\nAllow access to\nInitial scope: ${displayText(target.resource)}`, candidates, { signal: context.signal });
+    const choice = await approvalSelect(context, "scope", `Allow write access in sandbox\n\nAllow access to\nInitial scope: ${displayText(target.resource)}`, candidates, { signal: context.signal });
     if (!choice || !candidates.includes(choice)) return { action: "deny" };
     selected.push({ kind: "filesystem.write", resource: choice });
   }
   const available = options.durations(selected);
-  const chosen = await context.ui.select("Duration", available.map(value => durationLabels[value]), { signal: context.signal });
+  const chosen = await approvalSelect(context, "duration", "Duration", available.map(value => durationLabels[value]), { signal: context.signal });
   const duration = available.find(value => durationLabels[value] === chosen);
   if (!duration) return { action: "deny" };
-  const action = await context.ui.select(wideningSummary(options, selected, duration), ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
+  const action = await approvalSelect(context, "action", wideningSummary(options, selected, duration), ["Allow and retry", "Deny", "Run outside sandbox…"], { signal: context.signal });
   if (action === "Allow and retry") return { action: "allow", capabilities: selected, duration };
   return { action: action === "Run outside sandbox…" ? "host" : "deny" };
 }
