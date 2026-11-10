@@ -1,4 +1,5 @@
 import { ApprovalDiagnostics, approvalSelect, auditEvent, createDiagnosticFileSink, lookupResult, lookupStart, sessionPersistence, type ApprovalAudit } from "./approval-diagnostics.js";
+import { createSessionAuditSink, withSessionAuditLink } from "./session-audit.js";
 import { realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -121,6 +122,7 @@ export function createApprovalProvider(
       audit = { diagnostics, trace };
       diagnostics.emit(trace, { event: "provider.start", scopes: diagnostics.scopes(request.capabilities),
         observed: request.kind === "escalation" ? diagnostics.scopes(request.observedCapabilities ?? []) : undefined,
+        unavailableReasons: request.kind === "escalation" ? request.wideningUnavailableReasons : undefined,
         project: project ? diagnostics.token("project", project.projectId) : undefined });
     } catch { return decide(request, context); }
     const { trace } = audit;
@@ -146,11 +148,17 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   let cwd = process.cwd();
   let protectedRoot: string;
   let diagnosticFile: ReturnType<typeof createDiagnosticFileSink> | undefined;
-  const diagnostics = process.env.PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS === "1" ? new ApprovalDiagnostics(event => {
-    if (!protectedRoot) return;
-    diagnosticFile ??= createDiagnosticFileSink(join(protectedRoot, "diagnostics"));
-    diagnosticFile.sink(event);
+  const sessionAuditEnabled = process.env.PI_SELECTIVE_SANDBOX_SESSION_AUDIT !== "0";
+  const privateDiagnosticsEnabled = process.env.PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS === "1";
+  let sessionAudit: ReturnType<typeof createSessionAuditSink> | undefined;
+  const diagnostics = sessionAuditEnabled || privateDiagnosticsEnabled ? new ApprovalDiagnostics(event => {
+    sessionAudit?.sink(event);
+    if (privateDiagnosticsEnabled && protectedRoot) {
+      diagnosticFile ??= createDiagnosticFileSink(join(protectedRoot, "diagnostics"));
+      diagnosticFile.sink(event);
+    }
   }) : undefined;
+  if (sessionAuditEnabled && diagnostics) sessionAudit = createSessionAuditSink((type, data) => pi.appendEntry(type, data), diagnostics.originId);
   const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi, diagnostics });
   const commandNamespace = randomUUID();
   let enabled = true;
@@ -215,6 +223,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   const approvalContext = (context: ApprovalUI & { cwd?: string }) => subagents.binding && !context.hasUI
     ? bridgeApprovalContext(context, subagents.binding.bridge, { diagnostics }) : context;
   pi.on("session_start", async (_event, context) => {
+    sessionAudit?.start();
     await ensureSetup(context);
     await subagents.start(context, loadedConfig, protectedRoot);
   });
@@ -222,6 +231,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     const safeActions = new Set(["list", "status", "guide", "models", "cost", "doctor", "stop", "interrupt", "steer", "debug.run"]);
     if (event.toolName === "subagent" && subagents.unavailable && !safeActions.has(String(event.input?.action ?? ""))) {
       return { block: true, reason: "Subagent sandbox integration is unavailable; no child was launched." };
+    }
+  });
+  pi.on("tool_result", event => {
+    if (sessionAudit?.active && diagnostics && ["bash", "write", "edit"].includes(event.toolName)) {
+      return { details: withSessionAuditLink({ details: event.details }, diagnostics.originId, diagnostics.token("call", event.toolCallId)).details };
     }
   });
   let runtime: AnthropicSandboxRuntime | undefined;
@@ -252,6 +266,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     return enabled;
   };
   pi.on("session_shutdown", async () => {
+    sessionAudit?.close(); // Late selector callbacks must not enter a replacement session.
     try { await subagents.close(); } finally { await runtime?.dispose(); void diagnosticFile?.close(); }
   });
   const localOperations = createLocalBashOperations();

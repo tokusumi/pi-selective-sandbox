@@ -5,6 +5,7 @@ import { pathContains } from "./git-write-paths.js";
 import { realpath } from "node:fs/promises";
 import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
+import { networkDiagnostics } from "./network-diagnostics.js";
 import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxObservationDiagnostic, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
 
 export type SelectiveSandboxOptions = { diagnostics?: ApprovalDiagnostics; diagnosticActor?: "parent" | "child"; runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; onDiagnostic?: (details: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: (trace?: ApprovalTrace) => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
@@ -15,12 +16,18 @@ const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redact
 export class SelectiveSandboxExecutor { constructor(private readonly options: SelectiveSandboxOptions) {}
   async execute(command: string, toolCallId: string, toolName = "bash"): Promise<ExecutionResult> {
     const { runtime, runner, policy, approvals, skills } = this.options;
-    if (!runtime) return this.unavailable();
-    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return this.finish(await runner.runHost(command), "host", []);
     const diagnostics = this.options.diagnostics;
     const operationId = diagnostics ? randomUUID() : undefined;
     const initialTrace: ApprovalTrace | undefined = diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: 0,
-      actor: this.options.diagnosticActor ?? "parent", tool: "bash" } : undefined;
+      actor: this.options.diagnosticActor ?? "parent", tool: "bash", callId: diagnostics.token("call", toolCallId) } : undefined;
+    let currentTrace = initialTrace;
+    const complete = (output: ExecutionResult) => {
+      if (currentTrace) diagnostics!.emit(currentTrace, { event: "operation.end", execution: output.disposition === "host" ? "host" : "sandbox",
+        disposition: output.disposition, exitCode: output.exitCode, outcome: output.exitCode === 0 ? "success" : "error" });
+      return output;
+    };
+    if (!runtime) return complete(this.unavailable());
+    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return complete(this.finish(await runner.runHost(command), "host", []));
     const granted = [...(await this.options.getSandboxCapabilities?.(initialTrace) ?? [])]
       .filter(capability => capability.kind !== "network" || runtime.supportsNetworkWidening);
     let commandId = toolCallId;
@@ -28,11 +35,15 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     let approvalsUsed = 0;
     let priorViolations: readonly Capability[] = [];
     for (;;) {
+      const trace: ApprovalTrace | undefined = approvalsUsed === 0 ? initialTrace : diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: approvalsUsed,
+        actor: this.options.diagnosticActor ?? "parent", tool: "bash", callId: initialTrace?.callId } : undefined;
+      currentTrace = trace;
       let attempt: CommandResult;
       try { attempt = await this.runSandbox(command, commandId, granted); }
-      catch (error) { await runtime.forgetCommand?.(commandId); return this.unavailable(error); }
+      catch (error) { await runtime.forgetCommand?.(commandId); return complete(this.unavailable(error)); }
+      if (trace) diagnostics!.emit(trace, { event: "attempt.result", execution: "sandbox", exitCode: attempt.exitCode, outcome: attempt.exitCode === 0 ? "success" : "error" });
       if (approvalsUsed > 0) this.status(`retry exit=${attempt.exitCode}`);
-      if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return this.finish(attempt, "sandbox", priorViolations); }
+      if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return complete(this.finish(attempt, "sandbox", priorViolations)); }
 
       let observed;
       let observationDiagnostic: SandboxObservationDiagnostic | undefined;
@@ -49,15 +60,14 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
             attempt = { ...attempt, stderr: `${attempt.stderr}${attempt.stderr.endsWith("\n") || !attempt.stderr ? "" : "\n"}${observationDiagnostic.warning}\n` };
           }
         }
-        return this.finish(attempt, "sandbox", priorViolations);
+        return complete(this.finish(attempt, "sandbox", priorViolations));
       }
-      const trace: ApprovalTrace | undefined = approvalsUsed === 0 ? initialTrace : diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: approvalsUsed,
-        actor: this.options.diagnosticActor ?? "parent", tool: "bash" } : undefined;
       const targetIds = diagnostics?.scopes(observed) ?? [];
       const currentTargets = new Set(targetIds.map(target => target.id));
       const repeated = [...currentTargets].filter(id => lastTargets.has(id)).length;
       const relation = lastTargets.size === 0 ? "first" : repeated === currentTargets.size && currentTargets.size === lastTargets.size ? "same" : repeated === 0 ? "new" : "mixed";
-      if (trace) diagnostics!.emit(trace, { event: "attempt.denial", observed: targetIds, relation });
+      if (trace) diagnostics!.emit(trace, { event: "attempt.denial", observed: targetIds, relation,
+        network: networkDiagnostics(observed, resource => diagnostics!.token("scope", `network\0${resource}`)) });
       lastTargets = currentTargets;
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
@@ -77,16 +87,16 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       // network/read denials can still offer exact-command host replay.
       if (!wideningBlocked && caps.length === 0 && (uncovered.length === 0 || uncovered.every(violation => violation.kind === "filesystem.write"))) {
         if (trace) diagnostics!.emit(trace, { event: "retry", reason: "covered", outcome: "skipped", relation });
-        return this.finish(attempt, "sandbox", observed);
+        return complete(this.finish(attempt, "sandbox", observed));
       }
       const violations = uncovered.length > 0 ? uncovered : observed;
       if (policy.decide(violations, { command, toolCallId }) === "deny" || !approvals) {
         if (trace) diagnostics!.emit(trace, { event: "retry", reason: "policy", outcome: "skipped", relation });
-        return this.finish(attempt, "denied", violations);
+        return complete(this.finish(attempt, "denied", violations));
       }
       if (approvalsUsed >= MAX_SANDBOX_APPROVALS) {
         if (trace) diagnostics!.emit(trace, { event: "retry", reason: "limit", outcome: "skipped", relation });
-        return this.finish(attempt, "sandbox", violations);
+        return complete(this.finish(attempt, "sandbox", violations));
       }
       const commandIdentity = await (this.options.commandIdentity ?? (async shellCommand => { try { return { shellCommand, cwd: await realpath(process.cwd()), executionMode: "shell" }; } catch { return undefined; } }))(command);
       const wideningUnavailableReasons: WideningUnavailableReason[] = [];
@@ -109,14 +119,23 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (decision === "host-allow-once" || decision === "host-allow-session" || decision === "host-allow-project") {
         if (trace) diagnostics!.emit(trace, { event: "retry", reason: "host", authority: "host", outcome: "allow", relation });
         this.status("approved host-replay");
-        const replay = await runner.runHost(command);
+        let replay: CommandResult;
+        try { replay = await runner.runHost(command); }
+        catch (error) {
+          if (trace) {
+            diagnostics!.emit(trace, { event: "attempt.result", execution: "host", outcome: "error" });
+            diagnostics!.emit(trace, { event: "operation.end", execution: "host", disposition: "host", outcome: "error" });
+          }
+          throw error;
+        }
+        if (trace) diagnostics!.emit(trace, { event: "attempt.result", execution: "host", exitCode: replay.exitCode, outcome: replay.exitCode === 0 ? "success" : "error" });
         this.status(`replay exit=${replay.exitCode}`);
-        return this.finish(replay, "host", violations);
+        return complete(this.finish(replay, "host", violations));
       }
       const selected = typeof response === "string" ? caps : response.capabilities;
       if (decision === "deny" || caps.length === 0 || (typeof response !== "string" && !await validateWideningSelection(caps, selected))) {
         if (trace) diagnostics!.emit(trace, { event: "retry", outcome: "deny", relation });
-        this.status("approval-denied"); return this.finish(attempt, "denied", violations);
+        this.status("approval-denied"); return complete(this.finish(attempt, "denied", violations));
       }
       if (trace) diagnostics!.emit(trace, { event: "retry", reason: "widen", authority: "resource", outcome: "allow", relation, scopes: diagnostics!.scopes(selected) });
       this.status("approved widen retry");

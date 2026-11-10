@@ -12,6 +12,10 @@ export type Capability = {
 
 export type SandboxViolation = Capability & { message?: string };
 
+/** Closed, identity-free classification; never used for an authorization decision. */
+export type NetworkDiagnostic = { id: string; reason: "proxy-allowlist" | "proxy-address-guard" | "proxy-host-invalid" | "unix-socket" | "raw-socket" | "unknown";
+  family: "github" | "github-actions" | "go" | "aws" | "terraform" | "other" };
+
 /** Observation metadata is diagnostic only, never evidence for an approval. */
 export type SandboxObservationDiagnostic = { details: string; warning?: string };
 

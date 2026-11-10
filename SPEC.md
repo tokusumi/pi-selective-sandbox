@@ -203,11 +203,18 @@ prompt discloses all observed targets). Approval then streams `<sandbox: approve
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
 The `approval-required` marker precedes provider lookup and is **not a UI count**.
 A stored grant can return without a selector, and a single request can invoke
-multiple selectors. Opt-in [approval diagnostics](docs/approval-diagnostics.md)
-separate provider calls, lookup outcomes, selector dispatch/invocation/render,
-responses, grant persistence and observed-target retry correlation. They are
-non-authoritative and best-effort; built-in/RPC invocation does not prove pixel
-visibility. Diagnostic failure must not change decisions or execution order.
+multiple selectors. Default [session approval history](docs/approval-diagnostics.md)
+uses non-model-facing CustomEntry records to separate provider calls, lookup
+outcomes, selector dispatch/invocation/render, responses, persistence, retry
+correlation, closed network-denial categories and attempt/final exit results.
+Opaque call tokens link with tool-result details without adding raw tool IDs,
+commands, hosts, paths, denial text or credentials. Per-instance scope equality
+is not identity across reloads. Bounded records carry coverage/loss notices;
+missing older records mean unknown history, not zero UI. Session history may be
+explicitly opted out; the private file sink remains independently opt-in.
+These records are non-authoritative and best-effort; built-in/RPC invocation
+does not prove pixel visibility or that a denial caused a command failure.
+Diagnostic failure must not change decisions or execution order.
 Only the final selected attempt determines the tool exit code; denial retains
 the latest sandbox exit code. Ordinary failures and sandbox successes have no
 status marker. On macOS, missing correlated denials alone must not change a failed
