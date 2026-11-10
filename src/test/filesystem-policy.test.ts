@@ -20,7 +20,7 @@ test("default Cargo profile uses ~/.cargo and protects sensitive entries", async
   const { cwd, home } = await fixture();
   const policy = await resolveWritePolicy({ cwd, home, env: {}, config: parseConfig({}) });
   const cargo = join(home, ".cargo");
-  assert.deepEqual(policy.allow, [cwd, await realpath("/tmp"), cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
+  assert.deepEqual(policy.allow.slice(0, 5), [cwd, await realpath("/tmp"), cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
   const boundary = await MutationBoundary.create(cwd, policy);
   assert.equal((await boundary.resolve(join(cargo, "registry", "index"))).allowed, true);
   assert.equal((await boundary.resolve(join(cargo, ".package-cache"))).allowed, true);
@@ -36,7 +36,8 @@ test("CARGO_HOME, extra roots, tilde expansion, disabling, and runtime equality"
     cwd, home, env: { CARGO_HOME: cargo },
     config: parseConfig({ filesystem: { extraWritableRoots: ["~/build-cache", "relative-cache"], disabledDefaultProfiles: ["tmp"] } })
   });
-  assert.deepEqual(policy.allow, [cwd, cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug"), join(home, "build-cache"), join(cwd, "relative-cache")]);
+  assert.deepEqual(policy.allow.slice(0, 4), [cwd, cargo, join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
+  assert.deepEqual(policy.allow.slice(-2), [join(home, "build-cache"), join(cwd, "relative-cache")]);
   assert.deepEqual(buildSandboxRuntimeConfig({ cwd, writePolicy: policy }).filesystem, {
     allowRead: [], denyRead: [], allowWrite: [...policy.allow], denyWrite: [...policy.deny]
   });
@@ -46,7 +47,9 @@ test("CARGO_HOME, extra roots, tilde expansion, disabling, and runtime equality"
 test("cargo profile can be disabled", async () => {
   const { cwd, home } = await fixture();
   const policy = await resolveWritePolicy({ cwd, home, env: {}, config: parseConfig({ filesystem: { disabledDefaultProfiles: ["cargo-cache"] } }) });
-  assert.deepEqual(policy, { allow: [cwd, await realpath("/tmp"), join(home, ".npm", "_logs"), join(home, ".claude", "debug")], deny: [] });
+  assert.deepEqual(policy.allow.slice(0, 4), [cwd, await realpath("/tmp"), join(home, ".npm", "_logs"), join(home, ".claude", "debug")]);
+  assert.ok(!policy.allow.includes(join(home, ".cargo")));
+  assert.deepEqual(policy.deny, []);
 });
 
 test("resolved policy canonicalizes symlink roots", async () => {

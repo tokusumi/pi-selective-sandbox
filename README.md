@@ -68,7 +68,7 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 ## Behavior
 
-The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the session startup working directory, `/tmp`, and Cargo's cache area writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
+The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the session startup working directory, `/tmp`, Cargo's cache area, and npm/uv/gh/Go cache directories writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
 When that startup directory is writable and belongs to a Git repository, a blocked Git metadata write offers the shared Git directory and, only if it is outside the shared directory, the worktree's Git directory. Git writes can span the index, objects, refs, reflogs, tags, and worktree records; this approval lets a multi-step operation retry without reaching a second Git metadata denial after it has already changed repository state. The shared directory grant can affect other worktrees and Git configuration or hooks, so the approval prompt names that scope. Configured deny paths still apply, and this access does not change the native `write` or `edit` boundaries.
 
@@ -179,7 +179,7 @@ Optional user-local configuration is read at startup from `<Pi agent directory>/
 ```json
 {
   "filesystem": {
-    "extraWritableRoots": ["~/.cache/uv", "/mnt/build-cache"],
+    "extraWritableRoots": ["/mnt/build-cache"],
     "disabledDefaultProfiles": []
   },
   "network": {
@@ -223,7 +223,21 @@ With local binding enabled, direct loopback does not consult this allowlist.
 Per-attempt proxies also inherit the SDK's upstream HTTP_PROXY / HTTPS_PROXY /
 NO_PROXY routing.
 
-Paths beginning with `~/` are expanded, relative paths are resolved against the startup working directory, and paths are canonicalized. Available default profile names are `workspace`, `tmp`, `cargo-cache`, and `runtime-home`. The last profile mirrors the sandbox runtime's implicit `~/.npm/_logs` and `~/.claude/debug` allowances for native tools; disabling it adds explicit runtime denies. For example, set `disabledDefaultProfiles` to `["cargo-cache"]` to remove Cargo's default writable cache profile.
+Paths beginning with `~/` are expanded, relative paths are resolved against the startup working directory, and paths are canonicalized. Available default profile names are `workspace`, `tmp`, `cargo-cache`, `runtime-home`, `npm-cache`, `uv-cache`, `gh-cache`, and `go-cache`. The last profile mirrors the sandbox runtime's implicit `~/.npm/_logs` and `~/.claude/debug` allowances for native tools; disabling it adds explicit runtime denies. For example, set `disabledDefaultProfiles` to `["cargo-cache"]` to remove Cargo's default writable cache profile.
+
+The four package-cache profiles are independently disableable. They allow npm's
+`_cacache` (including random temporary files), uv/gh's `~/.cache` subdirectories,
+and Go's build, module, and checksum-state directories—not HOME, whole cache
+bases, authentication stores, Go bin, or uv tools. Startup environment overrides
+and dedicated cache symlinks are supported; unsafe broad/protected canonical
+roots are omitted. Explicit extra roots retain their existing override behavior.
+See [cache paths, precedence, opt-outs, and shared-cache poisoning risks](docs/cache-write-profiles.md).
+Shared writable caches can affect other projects and host consumers; disable
+these profiles and use per-project caches for untrusted work. No host automatic
+execution is added. Go network access is separate and unchanged: cold downloads
+may need explicit `network.extraAllowedDomains` entries for
+`proxy.golang.org:443` and, for direct checksum access, `sum.golang.org:443`.
+AWS/private endpoints are not automatically allowed.
 
 The sandbox runtime also owns a small set of operational housekeeping paths such as `/tmp/claude`; these are not user-configurable policy roots and are outside cross-surface parity. A bash violation intersecting any configured deny root is never offered sandbox widening, because `denyWrite` would make that retry ineffective. Only exact-command host replay can be offered in that case; native write/edit fail without an approval prompt.
 

@@ -9,7 +9,7 @@ export type SelectiveSandboxConfig = {
   };
 };
 
-export const DEFAULT_WRITE_PROFILES = ["workspace", "tmp", "cargo-cache", "runtime-home"] as const;
+export const DEFAULT_WRITE_PROFILES = ["workspace", "tmp", "cargo-cache", "runtime-home", "npm-cache", "uv-cache", "gh-cache", "go-cache"] as const;
 export type DefaultWriteProfile = typeof DEFAULT_WRITE_PROFILES[number];
 export type ConfigLoadResult = { valid: true; config: SelectiveSandboxConfig } | { valid: false };
 

@@ -8,6 +8,8 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { AnthropicSandboxRuntime } from "../runtime-adapter.js";
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { CapabilityPolicy } from "../policy.js";
+import { parseConfig } from "../config.js";
+import { resolveWritePolicy } from "../filesystem-policy.js";
 
 const exec = promisify(execFile);
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -18,6 +20,58 @@ async function run(command: string, cwd: string) {
     if (typeof failed.code !== "number") throw error;
     return { exitCode: failed.code, stdout: failed.stdout, stderr: failed.stderr };
   }
+}
+
+for (const mode of ["default", "opt-out", "canonical-env-deny"] as const) {
+  test(`native macOS cache profiles: ${mode}`, { skip: process.platform !== "darwin" }, async t => {
+    const root = await realpath(await mkdtemp(join(process.cwd(), ".cache-policy-")));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const cwd = join(root, "project"), home = join(root, "home");
+    await Promise.all([mkdir(cwd), mkdir(home)]);
+    const cacheProfiles = ["npm-cache", "uv-cache", "gh-cache", "go-cache"];
+    const env: NodeJS.ProcessEnv = {};
+    let targets = [join(home, ".npm", "_cacache"), join(home, ".cache", "uv"), join(home, ".cache", "gh"),
+      join(home, "Library", "Caches", "go-build"), join(home, "go", "pkg", "mod"), join(home, "go", "pkg", "sumdb")];
+    const cargo = join(home, ".cargo");
+    if (mode === "canonical-env-deny") {
+      const storage = join(root, "storage"), alias = join(root, "alias");
+      await mkdir(storage); await symlink(storage, alias);
+      Object.assign(env, { npm_config_cache: join(alias, "npm"), UV_CACHE_DIR: join(alias, "uv"),
+        XDG_CACHE_HOME: join(alias, "xdg"), GOCACHE: join(alias, "go-build"), GOPATH: join(alias, "go") });
+      targets = [join(alias, "npm", "_cacache"), env.UV_CACHE_DIR!, join(alias, "xdg", "gh"), env.GOCACHE!,
+        join(alias, "go", "pkg", "mod"), join(alias, "go", "pkg", "sumdb")];
+      // Existing Cargo deny must survive an explicit cache-adjacent allow.
+      await mkdir(cargo, { recursive: true });
+    }
+    // Pre-create only fixture dirs, never any real user cache.
+    for (const target of targets) await mkdir(target, { recursive: true });
+    const policy = await resolveWritePolicy({ cwd, home, env, config: parseConfig({ filesystem: {
+      disabledDefaultProfiles: ["tmp", ...(mode === "opt-out" ? cacheProfiles : [])],
+      extraWritableRoots: mode === "canonical-env-deny" ? [cargo] : []
+    } }) });
+    const runtime = await AnthropicSandboxRuntime.initialize({ cwd, writePolicy: policy, allowedDomains: [], allowLocalBinding: false });
+    t.after(() => runtime.dispose());
+    const denied = [join(home, "go", "bin", "tool"), join(home, ".config", "gh", "hosts.yml"),
+      join(home, ".local", "share", "uv", "tools", "tool"), join(cargo, "credentials.toml")];
+    const source = `
+      const fs = require('node:fs'); const path = require('node:path');
+      const targets = ${JSON.stringify(targets.map(target => join(target, "tmp", "uuid")))};
+      const denied = ${JSON.stringify(denied)};
+      const results = [...targets, ...denied].map(file => {
+        try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, 'cache'); return true; }
+        catch (error) { if (!['EPERM', 'EACCES', 'EROFS'].includes(error.code)) throw error; return false; }
+      }); console.log(JSON.stringify(results));
+    `;
+    const command = `${quote(process.execPath)} -e ${quote(source)}`;
+    const executor = new SelectiveSandboxExecutor({ runtime, cwd, policy: new CapabilityPolicy([]),
+      runner: { runSandbox: wrapped => run(wrapped, cwd), runHost: async () => { throw new Error("Cache test must stay sandboxed"); } },
+      approvals: { request: async () => { throw new Error("Cache fixture must not request approval"); } }
+    });
+    const result = await executor.execute(command, `cache-${mode}`);
+    assert.equal(result.disposition, "sandbox");
+    assert.equal(result.exitCode, 0, JSON.stringify(result));
+    assert.deepEqual(JSON.parse(result.stdout), [...targets.map(() => mode !== "opt-out"), ...denied.map(() => false)]);
+  });
 }
 
 // Fresh native processes, no watcher/pgrep doubles or polling fallbacks.
