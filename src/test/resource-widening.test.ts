@@ -44,6 +44,8 @@ test("resource approval separates ancestor selection, duration, and final confir
   assert.equal(seen[1].choices[0], "Once");
   assert.match(seen[2].title, /Blocked target/);
   assert.match(seen[2].title, /everything beneath/);
+  assert.match(seen[2].title, /For bash sandbox commands, directory access includes descendants/);
+  assert.match(seen[2].title, /Native write\/edit require an exact target match/);
   assert.match(seen[2].title, /entire command/);
   assert.equal(grants.covers("A", [write(parent)]), true);
   assert.equal(grants.covers("A", [write(target)]), false);
@@ -152,6 +154,7 @@ test("TUI starts narrow and once; pasted paths do nothing; Enter requires final 
   const options = dialogOptions();
   const dialog = createWideningDialog(options, plainTheme, () => {}, choice => results.push(choice));
   assert.match(dialog.render(80).join("\n"), /Duration\nOnce/);
+  assert.match(dialog.render(200).join("\n"), /Native write\/edit require an exact target match/);
   dialog.handleInput?.("/arbitrary/path");
   dialog.handleInput?.("\r"); // scope -> duration
   dialog.handleInput?.("\r"); // duration -> actions

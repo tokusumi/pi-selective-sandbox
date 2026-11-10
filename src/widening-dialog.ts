@@ -7,6 +7,7 @@ import { pathContains } from "./git-write-paths.js";
 import type { Capability, EscalationApprovalRequest } from "./types.js";
 
 export type ApprovalDuration = "once" | "session" | "project";
+const nativeTargetNotice = "For bash sandbox commands, directory access includes descendants. Native write/edit require an exact target match, not a parent-directory grant.";
 export const durationLabels = { once: "Once", session: "This session", project: "This project" } satisfies Record<ApprovalDuration, string>;
 export type WideningChoice = { action: "allow"; capabilities: readonly Capability[]; duration: ApprovalDuration } | { action: "host" | "deny" };
 export type WideningDialogOptions = {
@@ -42,7 +43,7 @@ export function wideningSummary(options: WideningDialogOptions, selected: readon
     ...(hasNetwork ? ["Only the listed exact network endpoints are permitted; other hosts and ports remain blocked."] : []),
     ...(hasWrites ? [selected.some(scope => scope.kind === "filesystem.write" && scope.resource === "/")
       ? "WARNING: Allows writes across the entire filesystem. Existing deny rules still apply."
-      : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply."] : []),
+      : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply.", nativeTargetNotice] : []),
     ...options.warnings(selected), "", `Duration: ${durationLabels[duration]}`,
     ...(duration === "project" && options.projectId ? [`Project: ${displayText(options.projectId)}`] : []),
     "", "Command", displayText(request.command),
@@ -142,6 +143,7 @@ export function createWideningDialog(options: WideningDialogOptions, theme: Pick
       add(scopes.some(scope => scope.resource === "/")
         ? "WARNING: Allows writes across the entire filesystem. Existing deny rules still apply."
         : "Allows writes to each selected path and everything beneath it. Existing deny rules still apply.", scopes.some(scope => scope.resource === "/") ? "warning" : "muted");
+      add(nativeTargetNotice, "muted");
       for (const warning of options.warnings(scopes)) add(warning, "warning");
       lines.push("");
       const durationStart = lines.length;

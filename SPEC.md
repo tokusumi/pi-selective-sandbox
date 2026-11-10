@@ -113,7 +113,10 @@ prefix, tool name, or executable-name match. The user may explicitly choose an
 ancestor directory for bash widening; that directory is the granted resource.
 Inside the sandbox, a directory write grant permits writes beneath it, subject
 to existing deny rules. Native write/edit approvals continue to match exact
-canonical targets rather than inheriting ancestor grants.
+canonical targets rather than inheriting ancestor grants. This is deliberate: the
+stored capability/resource identity contains no explicit directory-grant provenance;
+it must not be reinterpreted to broaden historical leaf grants for native tools.
+See [the decision record](docs/native-grant-semantics.md).
 
 ## 5. Bash execution flow
 
@@ -187,7 +190,9 @@ fallback, not a filesystem or deny-root diagnosis. Correlated denials do not
 prove the cause of every command error; TLS error text alone is not a violation.
 Both retry paths warn that the entire command runs again and can repeat earlier effects.
 Native write/edit retain exact-target preflight approval, without this ancestor
-selection or host action.
+selection or host action. Both TUI and sequential bash confirmations must explain
+that directory descendants are covered for bash sandbox commands, while native
+write/edit require an exact target match.
 
 All attempts may remain visible in the streamed execution transcript. Before
 requesting approval for a detected violation, the extension streams
@@ -235,6 +240,24 @@ canonical target
   → inside an allow root and outside every deny root → execute
   → otherwise → preflight sandbox-capability approval
 ```
+
+The native prompt names the exact canonical capability target and explains why
+approval is needed: no eligible stored grant matches that target. A bash approval
+for an ancestor directory is not inherited. Native approval does not authorize
+its parent, siblings or descendants. Session/Project exact-file grants are shared
+between write and edit and can also be applied as bash sandbox capabilities;
+conversely, an exact-file grant from bash can satisfy native preflight. A bash
+directory grant still authorizes later bash writes beneath it. These application
+rules do not change exact store identity or broaden old native leaf grants.
+
+Once grants are operation-local. Session grants are memory-only, disappear on
+extension reload/restart, and do not belong to another child's session. Project
+grant stores are reread for each lookup and new bash invocation under the resolved
+project identity; completed persisted additions/removals are visible without
+reload. Already-running operations are not cancelled; section 10 specifies the
+freshness and concurrent-writer limits. A canonical target changed by symlink retargeting
+does not inherit an old exact grant. Deny roots reject before stored-grant lookup
+or UI, including the private approvals root even with broad bash grants.
 
 No host-command approval is offered for native `write` or `edit`. If preflight
 authorization is denied or persistent storage fails, no native tool invocation,
