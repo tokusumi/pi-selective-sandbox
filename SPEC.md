@@ -372,6 +372,42 @@ another. Moving or cloning a repository does not inherit its project grants.
 Previously stored grants keyed to an individual linked worktree are not migrated
 to the base identity; approve them again for the shared project if needed.
 
+### Live project-grant storage
+
+Both project stores read and parse the current file on every authorization
+lookup and enumeration (`covers`, `capabilities`, `commands`). Startup fixes the
+project identity, not an approval snapshot. Already-running sessions and native
+children with the same project identity and store path therefore see completed
+persistent additions/replacements without restart or explicit `load()`. The
+`load()` method remains compatible but does not retain authorization state.
+No mtime/size cache or file watcher is used.
+
+- Resource identities remain exact project + capability kind + resource; host
+  identities remain exact project + command + canonical cwd + execution mode.
+  The files and authority types stay separate. Once and Session approvals remain
+  operation-local and session-local, respectively; they are not shared via disk.
+- A completed deletion or removal of an entry is reflected in the next lookup.
+  Missing files, read failures, invalid JSON, unsupported versions and invalid
+  top-level structures yield no project grants for that lookup, never the last
+  successful snapshot. As before, invalid individual entries are filtered out;
+  valid entries in an otherwise valid version-1 store remain usable. Subsequent
+  valid files are recognized automatically, including after a transient failure.
+- Each lookup is a snapshot, not an authorization transaction. An already-started
+  sandbox invocation (including its retries) retains its operation's capability
+  snapshot, and an already-authorized mutation or host replay is not cancelled
+  retroactively. Revocation applies at subsequent lookup/operation boundaries.
+- Each grant write rereads the file, merges into that snapshot, and atomically
+  renames a private, uniquely named temporary file over the store. Sequential
+  additions from multiple processes are preserved. **Overlapping read/merge/write
+  operations are last-writer-wins, not serialized**: simultaneous additions can
+  lose an entry and require approval again. Atomic rename prevents partial-file
+  publication, not lost updates. A writer racing an external removal can restore
+  entries from its earlier read; external revocation/editing must be performed
+  without concurrent grant writers (quiesce granting sessions first). There is
+  no transactional revoke API. After a quiescent removal, later writes merge
+  only the current disk contents and cannot restore an old in-memory snapshot.
+  A failed write still denies the requested project approval.
+
 ## 11. Linux telemetry semantics
 
 ### Platform capabilities
