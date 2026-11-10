@@ -200,8 +200,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
       if (projectId) {
         const projectGrants = new ProjectGrantStore(join(getAgentDir(), "pi-selective-sandbox", "project-grants.json"));
         const projectHostGrants = new ProjectHostCommandGrantStore(join(getAgentDir(), "pi-selective-sandbox", "host-command-grants.json"));
-        await projectGrants.load();
-        await projectHostGrants.load();
+        // Identity is fixed at setup; persistent approvals are read per lookup,
+        // including changes made later by other sessions and native children.
         project = { projectId, grants: projectGrants, hostGrants: projectHostGrants };
       }
     })();

@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { commandIdentityKey } from "./session-host-command-grants.js";
 import type { CommandIdentity } from "./types.js";
@@ -29,33 +30,35 @@ function parseStore(input: string): StoredGrants {
   } catch { return emptyStore(); }
 }
 
-/** User-local, persistent, exact project host-replay approvals. */
+/** User-local, persistent, exact project host-replay approvals.
+ * Lookups always read disk: another live Pi session may add or revoke grants.
+ */
 export class ProjectHostCommandGrantStore {
-  private cache: StoredGrants | undefined;
   constructor(readonly storagePath: string) {}
 
-  async load(): Promise<void> { this.cache = await this.readLatest(); }
+  /** Compatibility hook only; lookups never retain this snapshot. */
+  async load(): Promise<void> { await this.readLatest(); }
 
   async covers(projectId: string, command: CommandIdentity): Promise<boolean> {
-    const store = this.cache ?? await this.readAndCache();
+    const store = await this.readLatest();
     return (store.projects[projectId] ?? []).some(entry => commandIdentityKey(entry) === commandIdentityKey(command));
   }
 
   async commands(projectId: string): Promise<readonly CommandIdentity[]> {
-    const store = this.cache ?? await this.readAndCache();
+    const store = await this.readLatest();
     return (store.projects[projectId] ?? []).map(command => ({ ...command }));
   }
 
   async grant(projectId: string, command: CommandIdentity): Promise<void> {
+    // Merge the latest snapshot, not a previous lookup. Overlapping writers
+    // remain last-writer-wins; atomic replacement is not transaction isolation.
     const store = await this.readLatest();
     const current = store.projects[projectId] ?? [];
     if (!current.some(entry => commandIdentityKey(entry) === commandIdentityKey(command))) current.push({ ...command });
     store.projects[projectId] = current;
     await this.writeAtomically(store);
-    this.cache = store;
   }
 
-  private async readAndCache(): Promise<StoredGrants> { const store = await this.readLatest(); this.cache = store; return store; }
   private async readLatest(): Promise<StoredGrants> {
     try { return parseStore(await readFile(this.storagePath, "utf8")); }
     catch { return emptyStore(); }
@@ -64,9 +67,11 @@ export class ProjectHostCommandGrantStore {
     const directory = dirname(this.storagePath);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700).catch(() => undefined);
-    const temporary = join(directory, "." + basename(this.storagePath) + "." + process.pid + "." + Date.now() + ".tmp");
-    await writeFile(temporary, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600 });
-    await chmod(temporary, 0o600).catch(() => undefined);
-    await rename(temporary, this.storagePath);
+    const temporary = join(directory, "." + basename(this.storagePath) + "." + randomUUID() + ".tmp");
+    await writeFile(temporary, JSON.stringify(store, null, 2) + "\n", { encoding: "utf8", mode: 0o600, flag: "wx" });
+    try {
+      await chmod(temporary, 0o600).catch(() => undefined);
+      await rename(temporary, this.storagePath);
+    } finally { await rm(temporary, { force: true }).catch(() => undefined); }
   }
 }

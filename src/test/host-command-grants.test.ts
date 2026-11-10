@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { createApprovalProvider } from "../pi-extension.js";
 import { CapabilityPolicy } from "../policy.js";
 import { ProjectHostCommandGrantStore } from "../project-host-command-grants.js";
+import { ProjectGrantStore } from "../project-grants.js";
 import { SessionGrantStore } from "../session-grants.js";
 import { commandIdentityKey, SessionHostCommandGrantStore } from "../session-host-command-grants.js";
 import type { ApprovalRequest, CommandIdentity, CommandResult, EscalationApprovalRequest, SandboxRuntime } from "../types.js";
@@ -58,6 +59,12 @@ test("host once is not stored, while a session host grant is exact and session-l
 test("project host grant persists by project and stores command identity, not observed resource", async () => {
   const base = await mkdtemp(join(tmpdir(), "pi-host-project-")); const path = join(base, "host-command-grants.json");
   const store = new ProjectHostCommandGrantStore(path); const hostSessions = new SessionHostCommandGrantStore();
+  const preloadedHosts = new ProjectHostCommandGrantStore(path);
+  const preloadedResources = new ProjectGrantStore(join(base, "caps.json"));
+  await Promise.all([preloadedHosts.load(), preloadedResources.load()]);
+  const future = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "B" } }, new SessionGrantStore(),
+    { projectId: "/project-a", grants: preloadedResources, hostGrants: preloadedHosts }, new SessionHostCommandGrantStore());
+  assert.equal(await future.request(escalation(command())), "deny");
   const provider = createApprovalProvider({ hasUI: true, sessionManager: { getSessionId: () => "A" }, ui: { select: async (title, choices) => {
     if (choices.includes(capability.resource)) return capability.resource;
     if (title === "Duration") return "Once";
@@ -66,11 +73,20 @@ test("project host grant persists by project and stores command identity, not ob
   } } }, new SessionGrantStore(), { projectId: "/project-a", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(base, "caps.json")), hostGrants: store }, hostSessions);
   assert.equal(await provider.request(escalation(command())), "host-allow-project");
   assert.equal(await new ProjectHostCommandGrantStore(path).covers("/project-a", command()), true);
-  const future = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "B" } }, new SessionGrantStore(), { projectId: "/project-a", grants: new (await import("../project-grants.js")).ProjectGrantStore(join(base, "caps.json")), hostGrants: new ProjectHostCommandGrantStore(path) }, new SessionHostCommandGrantStore());
   assert.equal(await future.request(escalation(command())), "host-allow-project");
+  for (const mismatch of [command("/different"), command("/project", "npm test"), command("/project", "npm run build", "login-shell")]) {
+    assert.equal(await future.request(escalation(mismatch)), "deny");
+  }
+  assert.deepEqual(await preloadedResources.capabilities("/project-a"), []);
   assert.equal(await new ProjectHostCommandGrantStore(path).covers("/project-b", command()), false);
   const persisted = await readFile(path, "utf8");
   assert.match(persisted, /shellCommand/); assert.doesNotMatch(persisted, /"resource"/); assert.doesNotMatch(persisted, /observed\/foo/);
+  await rm(path);
+  assert.equal(await future.request(escalation(command())), "deny");
+  await preloadedResources.grant("/project-a", [capability]);
+  // Refreshing a resource permission must never restore the revoked host approval.
+  assert.equal(await future.request(escalation(command())), "sandbox-allow-project");
+  assert.equal(await preloadedHosts.covers("/project-a", command()), false);
 });
 
 test("malformed host project grants fail closed", async () => {
