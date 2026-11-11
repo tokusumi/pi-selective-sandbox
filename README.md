@@ -84,7 +84,7 @@ pi install git:github.com/tokusumi/pi-selective-sandbox
 
 ## Behavior
 
-The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the session startup working directory, `/tmp`, Cargo's cache area, and npm/uv/gh/Go cache directories writable, broad reads, and, on macOS, common Git, Node, Rust, and Python network endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
+The extension replaces Pi's `bash`, `write`, and `edit` tools. `bash` starts with the session startup working directory, `/tmp`, Cargo's cache area, and npm/uv/gh/Go cache directories writable, broad reads, and, on macOS, common Git, Node, Rust, Python, and additional package-service endpoints allowed by default (including GitHub API access for authenticated `gh` use). The Cargo profile permits `$CARGO_HOME` (or `~/.cargo`) but explicitly denies its `bin`, `config`, `config.toml`, `credentials`, `credentials.toml`, and `env` entries. If the sandbox cannot initialize or run, execution fails closed: it never silently falls back to the host.
 
 When that startup directory is writable and belongs to a Git repository, a blocked Git metadata write offers the shared Git directory and, only if it is outside the shared directory, the worktree's Git directory. Git writes can span the index, objects, refs, reflogs, tags, and worktree records; this approval lets a multi-step operation retry without reaching a second Git metadata denial after it has already changed repository state. The shared directory grant can affect other worktrees and Git configuration or hooks, so the approval prompt names that scope. Configured deny paths still apply, and this access does not change the native `write` or `edit` boundaries.
 
@@ -129,7 +129,7 @@ Seatbelt; the SDK forces Java's IPv4 stack, but other clients may need native
 IPv4 or IPv6 loopback sockets. Unix sockets remain restricted on macOS.
 
 Set `network.allowLocalBinding` to `false` to restore the proxy-only local TCP
-policy. This is independent of destination profiles; disabling all four profiles
+policy. This is independent of destination profiles; disabling all destination profiles
 does not disable local networking. There is no listener port allowlist or per-port
 approval flow. This option does not change Linux behavior.
 
@@ -210,20 +210,26 @@ macOS network defaults are grouped into independently switchable profiles:
 
 | Profile | Default destinations |
 | --- | --- |
-| `git` | `github.com`, `api.github.com`, `*.github.com`; HTTPS to `gitlab.com`, `bitbucket.org`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` |
+| `git` | `github.com`, `api.github.com`, `*.github.com`; HTTPS to `gitlab.com`, `bitbucket.org`, `raw.githubusercontent.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `results-receiver.actions.githubusercontent.com` |
 | `node` | HTTPS to `registry.npmjs.org`, `registry.yarnpkg.com`, `nodejs.org`, `get.pnpm.io` |
 | `rust` | HTTPS to `crates.io`, `index.crates.io`, `static.crates.io`, `static.rust-lang.org`, `sh.rustup.rs` |
 | `python` | HTTPS to `pypi.org`, `files.pythonhosted.org`, `python.org`, `www.python.org`, `astral.sh` |
+| `packages` | HTTPS to `proxy.golang.org`, `sum.golang.org`, `repo.maven.apache.org`, `repo1.maven.org`, `rubygems.org`, `index.rubygems.org`, `api.nuget.org`, `repo.packagist.org`, `packagist.org`, `getcomposer.org` |
 
 HTTPS means TCP port 443 only. The original GitHub host patterns retain their
 existing all-port behavior. These profiles group destinations, not executables:
 any sandboxed command may reach an enabled destination. They cover common
 package installs and toolchain downloads, not every mirror, redirect CDN, or
-self-hosted registry.
+self-hosted registry. The Actions receiver allowance does not grant Blob redirect
+destinations or guarantee complete log downloads. These are convenience allowances,
+not safety certifications; package content and arbitrary HTTP methods are not filtered.
+See [sources, exclusions and compatibility](docs/network-defaults.md).
 
 Set `network.disabledDefaultProfiles` to, for example, `["node", "python"]`
-to remove those destinations, or all four names to start with an empty proxy
-allowlist. Set `allowLocalBinding: false` as well for proxy-only networking.
+to remove those destinations, or `["packages"]` to remove
+only the additional package services. Disabling all five profiles empties the proxy
+allowlist. For compatibility, disabling all four original names (`git`, `node`,
+`rust`, `python`) also suppresses `packages`, preserving existing full opt-outs. Set `allowLocalBinding: false` as well for proxy-only networking.
 Disabling a profile removes its baseline allowances; it is not a hard deny of
 explicit additions or later approvals. Filesystem profiles are independent.
 
@@ -250,9 +256,10 @@ roots are omitted. Explicit extra roots retain their existing override behavior.
 See [cache paths, precedence, opt-outs, and shared-cache poisoning risks](docs/cache-write-profiles.md).
 Shared writable caches can affect other projects and host consumers; disable
 these profiles and use per-project caches for untrusted work. No host automatic
-execution is added. Go network access is separate and unchanged: cold downloads
-may need explicit `network.extraAllowedDomains` entries for
-`proxy.golang.org:443` and, for direct checksum access, `sum.golang.org:443`.
+execution is added. Go network access is separate: the `packages` network profile
+now permits `proxy.golang.org:443` and `sum.golang.org:443`. Disabling it removes
+those defaults regardless of the Go filesystem profile; explicit
+`network.extraAllowedDomains` entries can still permit individual endpoints.
 AWS/private endpoints are not automatically allowed.
 
 The sandbox runtime also owns a small set of operational housekeeping paths such as `/tmp/claude`; these are not user-configurable policy roots and are outside cross-surface parity. A bash violation intersecting any configured deny root is never offered sandbox widening, because `denyWrite` would make that retry ineffective. Only exact-command host replay can be offered in that case; native write/edit fail without an approval prompt.

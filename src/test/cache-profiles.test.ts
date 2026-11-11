@@ -179,12 +179,14 @@ test("native write/edit uses all four cache profiles without approval, disabled 
   assert.equal(approvals, 1);
 });
 
-test("Go filesystem profile does not grant network: public endpoints need explicit HTTPS config", () => {
-  const baseline = resolveNetworkDomains();
+test("Go filesystem profile does not override the independent package network profile", () => {
+  const baseline = resolveNetworkDomains(parseConfig({ network: { disabledDefaultProfiles: ["packages"] } }).network);
   for (const host of ["proxy.golang.org", "sum.golang.org"]) {
     assert.equal(baseline.some(pattern => matchesDomainPatternWithPort(host, 443, pattern)), false);
   }
-  const domains = resolveNetworkDomains(parseConfig({ network: { extraAllowedDomains: ["proxy.golang.org:443", "sum.golang.org:443"] } }).network);
+  const domains = resolveNetworkDomains(parseConfig({ network: {
+    disabledDefaultProfiles: ["packages"], extraAllowedDomains: ["proxy.golang.org:443", "sum.golang.org:443"]
+  } }).network);
   for (const host of ["proxy.golang.org", "sum.golang.org"]) {
     assert.equal(domains.some(pattern => matchesDomainPatternWithPort(host, 443, pattern)), true);
     assert.equal(domains.some(pattern => matchesDomainPatternWithPort(host, 80, pattern)), false);

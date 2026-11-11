@@ -84,16 +84,20 @@ changing startup configuration. No authentication contents are copied into polic
 
 ## Go network access is separate
 
-The existing network defaults are unchanged. On macOS, the filesystem profile
-alone does **not** permit `proxy.golang.org:443` or `sum.golang.org:443`. A cold
+On macOS, the filesystem profile alone grants no network authority. The independent
+`packages` network profile now permits `proxy.golang.org:443` and `sum.golang.org:443`
+by default; see [network defaults and opt-outs](network-defaults.md). Disabling
+`packages` removes these allowances even if `go-cache` remains enabled. A cold
 public module download normally needs the module proxy. The proxy can serve
 checksum database requests under its own endpoint, so direct sum.golang.org is
 not always contacted; direct/fallback checksum access may require it. Offline
-builds with complete caches need neither. To permit both explicit HTTPS endpoints:
+builds with complete caches need neither. To disable the broader package profile
+but retain these two explicit HTTPS endpoints:
 
 ```json
 {
   "network": {
+    "disabledDefaultProfiles": ["packages"],
     "extraAllowedDomains": ["proxy.golang.org:443", "sum.golang.org:443"]
   }
 }
@@ -139,8 +143,8 @@ Checked against official documentation/source on 2026-11-10:
 
 A bounded read-only council used oracle (fork context) and reviewer (runtime
 default context), one independent pass, no external-CLI fallback. Both supported
-independent profiles, canonical safety filtering, opt-out/explicit additions and
-unchanged network defaults. A reviewer suggestion to use all GOPATH entries was
+independent profiles, canonical safety filtering, opt-out/explicit additions and,
+at the time of that cache-only change, unchanged network defaults. A reviewer suggestion to use all GOPATH entries was
 rejected based on Go's `gopathDir` implementation; first entry only is correct.
 Relative-XDG gh fallback suggested in final review was rejected because gh's
 `CacheDir` joins the environment value literally; a regression test records that
