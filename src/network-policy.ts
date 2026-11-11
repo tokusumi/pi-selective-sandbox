@@ -3,22 +3,32 @@ import { isIP } from "node:net";
 import { canonicalizeHost, isValidHost } from "@anthropic-ai/sandbox-runtime/dist/sandbox/parent-proxy.js";
 import { splitDomainPatternPort } from "@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
 
-export const DEFAULT_NETWORK_PROFILES = ["git", "node", "rust", "python"] as const;
+const LEGACY_NETWORK_PROFILES = ["git", "node", "rust", "python"] as const;
+export const DEFAULT_NETWORK_PROFILES = [...LEGACY_NETWORK_PROFILES, "packages"] as const;
 type DefaultNetworkProfile = typeof DEFAULT_NETWORK_PROFILES[number];
 
 const PROFILE_DOMAINS: Record<DefaultNetworkProfile, readonly string[]> = {
   // Retain the existing GitHub allowance; new defaults are HTTPS-only.
   git: ["api.github.com", "github.com", "*.github.com", "gitlab.com:443", "bitbucket.org:443",
-    "raw.githubusercontent.com:443", "objects.githubusercontent.com:443", "release-assets.githubusercontent.com:443"],
+    "raw.githubusercontent.com:443", "objects.githubusercontent.com:443", "release-assets.githubusercontent.com:443",
+    "results-receiver.actions.githubusercontent.com:443"],
   node: ["registry.npmjs.org:443", "registry.yarnpkg.com:443", "nodejs.org:443", "get.pnpm.io:443"],
   rust: ["crates.io:443", "index.crates.io:443", "static.crates.io:443", "static.rust-lang.org:443", "sh.rustup.rs:443"],
-  python: ["pypi.org:443", "files.pythonhosted.org:443", "python.org:443", "www.python.org:443", "astral.sh:443"]
+  python: ["pypi.org:443", "files.pythonhosted.org:443", "python.org:443", "www.python.org:443", "astral.sh:443"],
+  // Curated package endpoints, not a safety certification or shared-CDN grant.
+  // Sources and exclusions: docs/network-defaults.md.
+  packages: ["proxy.golang.org:443", "sum.golang.org:443", "repo.maven.apache.org:443", "repo1.maven.org:443",
+    "rubygems.org:443", "index.rubygems.org:443", "api.nuget.org:443",
+    "repo.packagist.org:443", "packagist.org:443", "getcomposer.org:443"]
 };
 
 export function resolveNetworkDomains(config?: { extraAllowedDomains: readonly string[]; disabledDefaultProfiles?: readonly string[] }): string[] {
   const disabled = new Set(config?.disabledDefaultProfiles ?? []);
+  // Preserve the previously documented full opt-out: a new profile must not
+  // silently reopen networking for users who explicitly disabled all four.
+  const profiles = LEGACY_NETWORK_PROFILES.every(profile => disabled.has(profile)) ? [] : DEFAULT_NETWORK_PROFILES;
   return [...new Set([
-    ...DEFAULT_NETWORK_PROFILES.filter(profile => !disabled.has(profile)).flatMap(profile => PROFILE_DOMAINS[profile]),
+    ...profiles.filter(profile => !disabled.has(profile)).flatMap(profile => PROFILE_DOMAINS[profile]),
     ...(config?.extraAllowedDomains ?? [])
   ])];
 }

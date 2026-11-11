@@ -76,7 +76,8 @@ failures do not by themselves trigger automatic off.
   allowance or fallback root. Opt-out removes baseline additions, not explicit
   configuration or other profiles' authority; deny rules always win.
   These shared writable caches can poison artifacts across projects and host
-  consumers. No host automatic execution or Go network defaults are added.
+  consumers. Filesystem profiles add no network authority or host automatic
+  execution; the independent network defaults are specified in §17.
 
 ## 3. Approval authorities
 
@@ -607,25 +608,37 @@ and disabled local binding.
 Replacement tools are still registered, so invalid configuration cannot restore
 Pi's unsandboxed tools.
 
-Network defaults apply to macOS network isolation and have four profiles:
+Network defaults apply to macOS network isolation and have five profiles:
 
 | Profile | Allowed patterns |
 | --- | --- |
-| `git` | `api.github.com`, `github.com`, `*.github.com`, `gitlab.com:443`, `bitbucket.org:443`, `raw.githubusercontent.com:443`, `objects.githubusercontent.com:443`, `release-assets.githubusercontent.com:443` |
+| `git` | `api.github.com`, `github.com`, `*.github.com`, `gitlab.com:443`, `bitbucket.org:443`, `raw.githubusercontent.com:443`, `objects.githubusercontent.com:443`, `release-assets.githubusercontent.com:443`, `results-receiver.actions.githubusercontent.com:443` |
 | `node` | `registry.npmjs.org:443`, `registry.yarnpkg.com:443`, `nodejs.org:443`, `get.pnpm.io:443` |
 | `rust` | `crates.io:443`, `index.crates.io:443`, `static.crates.io:443`, `static.rust-lang.org:443`, `sh.rustup.rs:443` |
 | `python` | `pypi.org:443`, `files.pythonhosted.org:443`, `python.org:443`, `www.python.org:443`, `astral.sh:443` |
+| `packages` | `proxy.golang.org:443`, `sum.golang.org:443`, `repo.maven.apache.org:443`, `repo1.maven.org:443`, `rubygems.org:443`, `index.rubygems.org:443`, `api.nuget.org:443`, `repo.packagist.org:443`, `packagist.org:443`, `getcomposer.org:443` |
 
-All four profiles are enabled unless named in `network.disabledDefaultProfiles`.
+All five profiles are enabled unless named in `network.disabledDefaultProfiles`.
+For backward compatibility, disabling all four original profiles (`git`, `node`,
+`rust`, `python`) also suppresses the new `packages` defaults; a formerly empty
+allowlist must not silently reopen. Explicit additions still apply. Disabling
+`packages` alone leaves the original groups unchanged, with no duplicate profile
+ownership of its endpoints.
 Filesystem and network profile disable lists are independent. Unknown names or
-invalid fields fail closed. Disabling all four yields no default proxy network
-allowances; local binding is controlled independently by `network.allowLocalBinding`
+invalid fields fail closed. Disabling all five (or all four original profiles)
+yields no default proxy network allowances; local binding is controlled independently by `network.allowLocalBinding`
 (a boolean, default `true` on macOS). Explicit additions and capability grants
 may still authorize their resources. Disabling a profile removes baseline allowances, not a deny rule.
 Profiles authorize destinations for all sandboxed commands, not executable-name
 matches. They cover common package/toolchain routes, not arbitrary mirrors or
 shared redirect CDNs. New defaults are HTTPS/443-only; the pre-existing GitHub
-patterns retain their original all-port semantics.
+patterns retain their original all-port semantics. The Actions receiver is an
+exact host at port 443, not an `actions`/`githubusercontent` wildcard or Azure Blob
+allowance. Endpoint and redirect fixtures evaluate every destination independently;
+receiver success alone is not evidence of a complete log-download route. The
+additional package endpoints are curated connectivity defaults, not a safety
+certification or a wholesale import of another product's wildcard/method policy.
+See [source evidence and exclusions](docs/network-defaults.md).
 
 Optional `network.extraAllowedDomains` adds to the enabled defaults. The resolved
 list is deduplicated. Patterns use the SDK's domain/IP syntax: an exact host or `*.example.com`,

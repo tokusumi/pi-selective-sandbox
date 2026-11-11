@@ -7,13 +7,15 @@ import { matchesDomainPatternWithPort } from "@anthropic-ai/sandbox-runtime/dist
 
 // These are independently named product requirements, not expectations derived
 // from the profile arrays themselves. Adding a profile must not grant all hosts.
-test("default network policy permits common Git, Node, Rust and Python HTTPS endpoints", () => {
+test("default network policy permits common Git, Node, Rust, Python and package HTTPS endpoints", () => {
   const allowed = buildSandboxRuntimeConfig({ cwd: "/project", writePolicy: { allow: ["/project"], deny: [] } }).network.allowedDomains;
   for (const host of [
     "github.com", "api.github.com", "gitlab.com", "bitbucket.org", "raw.githubusercontent.com", "release-assets.githubusercontent.com",
     "registry.npmjs.org", "registry.yarnpkg.com", "nodejs.org", "get.pnpm.io",
     "crates.io", "index.crates.io", "static.crates.io", "static.rust-lang.org", "sh.rustup.rs",
-    "pypi.org", "files.pythonhosted.org", "python.org", "www.python.org", "astral.sh"
+    "pypi.org", "files.pythonhosted.org", "python.org", "www.python.org", "astral.sh",
+    "proxy.golang.org", "sum.golang.org", "repo.maven.apache.org", "repo1.maven.org",
+    "rubygems.org", "index.rubygems.org", "api.nuget.org", "repo.packagist.org", "packagist.org", "getcomposer.org"
   ]) {
     assert.ok(allowed.some(pattern => matchesDomainPatternWithPort(host, 443, pattern)), host);
   }
@@ -32,7 +34,7 @@ test("network profile configuration accepts independent disables and rejects unk
 });
 
 test("disabling a network profile changes only that group and keeps explicit additions", () => {
-  const examples = [["git", "gitlab.com"], ["node", "registry.npmjs.org"], ["rust", "static.crates.io"], ["python", "files.pythonhosted.org"]] as const;
+  const examples = [["git", "gitlab.com"], ["node", "registry.npmjs.org"], ["rust", "static.crates.io"], ["python", "files.pythonhosted.org"], ["packages", "proxy.golang.org"]] as const;
   for (const [profile, host] of examples) {
     const domains = resolveNetworkDomains(parseConfig({ network: { disabledDefaultProfiles: [profile] } }).network);
     for (const [otherProfile, otherHost] of examples) {
