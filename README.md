@@ -1,6 +1,6 @@
 # pi-selective-sandbox
 
-`pi-selective-sandbox` is a Pi extension that keeps command execution sandboxed by default and asks for a narrowly scoped exception only when the sandbox blocks an operation. **Sandbox by default. Escalate by exception.**
+`pi-selective-sandbox` is a Pi extension that keeps command execution sandboxed by default and separates command results, observed sandbox denials, and explicitly requested retries. **Sandbox by default. Escalate by exception.**
 
 > [!WARNING]
 > **This project is under early development.**
@@ -14,7 +14,7 @@ Pi can need access beyond a project's normal writable area, but an ordinary comm
 
 ## How it works
 
-Normal `bash` commands run in the OS sandbox first. Sandbox success and ordinary command failure return normally and do not prompt. Only a sandbox violation can offer an explicit exception. Native `write` and `edit` operations use equivalent preflight resource boundaries before they read or mutate a target.
+Normal `bash` commands run in the OS sandbox first and return their original exit code and output. A nonzero exit plus a correlated sandbox denial does not prove that the denial caused the exit. Approval/retry is offered only when that invocation explicitly sets `retryOnSandboxDenial: true`; the flag is intent, not permission. Native `write` and `edit` operations retain preflight resource boundaries before they read or mutate a target.
 
 The full behavioral and security contract is in [SPEC.md](SPEC.md).
 
@@ -34,19 +34,33 @@ For `bash`:
 ```text
 sandbox
    ↓
-violation
-   ├─ Allow resource in sandbox
-   │      → once / session / project
-   │
-   └─ Run exact command outside sandbox
-          → once / session / project
+nonzero exit + observed denial
+   ├─ no retry intent (default) → return original result + observation
+   └─ retryOnSandboxDenial: true → existing approvals below
+          ├─ Allow resource in sandbox
+          │      → once / session / project
+          │
+          └─ Run exact command outside sandbox
+                 → once / session / project
 ```
 
-Stored host-command grants do not bypass sandbox-first execution. The command is still tried in the sandbox first and only replays on host after a sandbox violation.
+Stored host-command grants do not bypass sandbox-first execution or initiate retry. The command is still tried in the sandbox first; host replay requires both explicit retry intent for that invocation and an eligible host approval after a sandbox violation.
+
+### Retry intent (compatibility change)
+
+`retryOnSandboxDenial` defaults to `false`. A nonzero result with observed denials returns `<sandbox: denial-observed retry-not-requested>` without approval, widening, or host replay. Pi's exit code and nonzero error flag stay unchanged; callers must interpret the command's own status contract rather than assuming a sandbox failure. CI pending, for example, remains a wait state, not a reason to replay on host; actual failed checks and API/authentication failures remain visible.
+
+If repeating the command to address denied access is appropriate, explicitly opt in for that invocation:
+
+```json
+{ "command": "some-tool operation", "retryOnSandboxDenial": true }
+```
+
+Existing approval rules still apply. Do not set the flag on every call. A later opted-in call starts with another sandbox attempt, not a continuation of the previous one; it and any approved retry can repeat earlier side effects. See [the execution contract](SPEC.md#5-bash-execution-flow).
 
 ### Resource approval UI
 
-For a bash filesystem-write violation, the approval screen separates **Blocked target**, **Allow access to**, **Duration**, and **Command**. Select the initial scope or any of its parent directories, then choose `Once`, `This session`, or `This project` when eligible, and confirm with `Allow and retry`. It starts with the initial scope and `Once`. Paths cannot be typed freely; candidates follow the canonical ancestor chain all the way to `/`, without special treatment for HOME.
+For an opted-in bash retry after a filesystem-write violation, the approval screen separates **Blocked target**, **Allow access to**, **Duration**, and **Command**. Select the initial scope or any of its parent directories, then choose `Once`, `This session`, or `This project` when eligible, and confirm with `Allow and retry`. It starts with the initial scope and `Once`. Paths cannot be typed freely; candidates follow the canonical ancestor chain all the way to `/`, without special treatment for HOME.
 
 A directory selection allows writes beneath that directory, including unrelated siblings of the blocked target. Selecting `/` displays an explicit whole-filesystem warning. Existing configured and SDK deny rules still apply, even with a broad scope. Git metadata and directory-entry operations retain their required initial scopes, which can differ from the observed leaf; the screen shows both. Selecting a parent of shared Git metadata remains once-only.
 
@@ -133,7 +147,7 @@ policy. This is independent of destination profiles; disabling all destination p
 does not disable local networking. There is no listener port allowlist or per-port
 approval flow. This option does not change Linux behavior.
 
-When a proxy-aware command reaches a blocked destination, the approval prompt
+When a proxy-aware command reaches a blocked destination and retry was explicitly requested, the approval prompt
 shows the exact `host:port`, asks for once, session, or project duration, and
 then offers **Allow and retry**. Endpoints are fixed; unlike filesystem write
 scopes, they cannot be expanded to ancestors. The retry stays in the sandbox; filesystem

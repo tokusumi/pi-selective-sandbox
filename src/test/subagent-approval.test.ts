@@ -33,7 +33,7 @@ for (const kind of ["filesystem.write", "network"] as const) {
       runner: { runSandbox: async () => ({ exitCode: attempts.length === 1 ? 1 : 0, stdout: "", stderr: "" }), runHost: async () => { throw new Error("Unexpected host replay"); } },
       policy: new CapabilityPolicy([]), approvals: provider
     });
-    assert.equal((await executor.execute("probe", "child-call")).disposition, "sandbox");
+    assert.equal((await executor.execute("probe", "child-call", "bash", { retryOnSandboxDenial: true })).disposition, "sandbox");
     assert.deepEqual(attempts, [[], [capability]]);
     assert.ok(titles.every(title => title.includes("/child/worktree") && title.includes("child-session")));
     assert.equal(titles.length, kind === "network" ? 2 : 3);

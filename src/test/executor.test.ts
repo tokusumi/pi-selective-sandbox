@@ -89,7 +89,7 @@ test("a correlated denial from false still requires explicit approval", async ()
   const f = fixtures([{ kind: "filesystem.write", resource: "/blocked/file" }]);
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner,
     approvals: { request: async () => { f.calls.approvals++; return "deny"; } }, policy: new CapabilityPolicy([]) });
-  assert.equal((await executor.execute("false", "false-with-denial")).disposition, "denied");
+  assert.equal((await executor.execute("false", "false-with-denial", "bash", { retryOnSandboxDenial: true })).disposition, "denied");
   assert.equal(f.calls.approvals, 1);
   assert.equal(f.calls.elevated, 0);
 });
@@ -125,7 +125,7 @@ test("trace observation reaches the existing host replay approval path", async (
       return "host-allow-once";
     } }
   });
-  const output = await executor.execute("touch ../blocked/file", "trace-call");
+  const output = await executor.execute("touch ../blocked/file", "trace-call", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "host");
   assert.equal(calls.approval, 1);
   assert.equal(calls.host, 1);
@@ -148,7 +148,7 @@ test("an attributed violation asks, warns about replay, then selectively escalat
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([]),
     approvals: { request: async value => { request = value; return "sandbox-allow-once"; } }
   });
-  const output = await executor.execute("cp result.json /reports/result.json", "call-2");
+  const output = await executor.execute("cp result.json /reports/result.json", "call-2", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.sandbox, 2);
   assert.equal(f.calls.elevated, 0);
@@ -170,7 +170,7 @@ test("mixed violations with a deny-root candidate suppress sandbox widening", as
     canonicalizeCapabilities: async () => undefined,
     approvals: { request: async request => { offered = request.capabilities; return "host-allow-once"; } }
   });
-  const output = await executor.execute("write two outputs", "mixed-deny");
+  const output = await executor.execute("write two outputs", "mixed-deny", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "host");
   assert.deepEqual(offered, []);
   assert.equal(f.calls.sandbox, 1);
@@ -187,7 +187,7 @@ test("a stored grant cannot hide a deny-root violation", async () => {
     canonicalizeCapabilities: async () => undefined,
     approvals: { request: async request => { offered = request.capabilities; return "host-allow-once"; } }
   });
-  assert.equal((await executor.execute("write denied output", "stored-deny")).disposition, "host");
+  assert.equal((await executor.execute("write denied output", "stored-deny", "bash", { retryOnSandboxDenial: true })).disposition, "host");
   assert.deepEqual(offered, []);
   assert.equal(f.calls.elevated, 1);
 });
@@ -197,7 +197,7 @@ test("post-violation auto policy still requires replay approval", async () => {
   const executor = new SelectiveSandboxExecutor({
     runtime: f.runtime, runner: f.runner, policy: new CapabilityPolicy([], "auto-escalate"), approvals: f.approvals
   });
-  const output = await executor.execute("echo x >> local.log && cp x /reports/result.json", "call-auto");
+  const output = await executor.execute("echo x >> local.log && cp x /reports/result.json", "call-auto", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.approvals, 1);
   assert.equal(f.calls.elevated, 0);
@@ -206,7 +206,7 @@ test("post-violation auto policy still requires replay approval", async () => {
 test("policy can deny a real violation without host execution", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/forbidden/file" }]);
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([{ kind: "filesystem.write", resource: /^\/forbidden/, decision: "deny" }]) });
-  const output = await executor.execute("cp x /forbidden/file", "call-3");
+  const output = await executor.execute("cp x /forbidden/file", "call-3", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "denied");
   assert.equal(f.calls.approvals, 0);
   assert.equal(f.calls.elevated, 0);
@@ -286,7 +286,7 @@ test("stored sandbox capabilities are applied before the first sandbox attempt",
 test("stored sandbox grants suppress matching diagnostic telemetry on normal failure", async () => {
   const f = fixtures([{ kind: "filesystem.write", resource: "/approved/output" }]);
   const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]), getSandboxCapabilities: async () => [{ kind: "filesystem.write", resource: "/approved/output" }] });
-  const output = await executor.execute("echo x > /approved/output; exit 1", "covered-telemetry");
+  const output = await executor.execute("echo x > /approved/output; exit 1", "covered-telemetry", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "sandbox");
   assert.equal(f.calls.approvals, 0);
   assert.equal(f.calls.elevated, 0);
@@ -305,7 +305,7 @@ test("one failure offers every observed write path together", async () => {
     policy: new CapabilityPolicy([]),
     approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
   });
-  const output = await executor.execute("write both paths", "multiple-paths");
+  const output = await executor.execute("write both paths", "multiple-paths", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.exitCode, 0);
   assert.deepEqual(offered, [paths]);
   assert.deepEqual(applied, [[], paths]);
@@ -324,7 +324,7 @@ test("a later write violation requests another grant before retrying", async () 
     policy: new CapabilityPolicy([]),
     approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
   });
-  const output = await executor.execute("write first && write second", "sequential-paths");
+  const output = await executor.execute("write first && write second", "sequential-paths", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.exitCode, 0);
   assert.deepEqual(offered, [[first], [second]]);
   assert.deepEqual(applied, [[], [first], [first, second]]);
@@ -342,7 +342,7 @@ test("denying a later write stops before a third sandbox run", async () => {
     policy: new CapabilityPolicy([]),
     approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return offered.length === 1 ? "sandbox-allow-once" : "deny"; } }
   });
-  const output = await executor.execute("write first && write second", "deny-later");
+  const output = await executor.execute("write first && write second", "deny-later", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "denied");
   assert.equal(runs, 2);
   assert.deepEqual(offered, [["/first"], ["/second"]]);
@@ -361,7 +361,7 @@ test("a repeat violation under the approved capability does not prompt again", a
     canonicalizeCapabilities: async () => [{ kind: "filesystem.write", resource: "/outside" }],
     approvals: { request: async request => { offered.push(request.capabilities.map(capability => capability.resource)); return "sandbox-allow-once"; } }
   });
-  const output = await executor.execute("write /outside/file", "repeat-path");
+  const output = await executor.execute("write /outside/file", "repeat-path", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "sandbox");
   assert.equal(runs, 2);
   assert.deepEqual(offered, [["/outside"]]);
@@ -384,7 +384,7 @@ test("network denial offers an exact endpoint and retries only in the sandbox", 
       return "sandbox-allow-once";
     } }
   });
-  assert.equal((await executor.execute("npm view example", "network")).disposition, "sandbox");
+  assert.equal((await executor.execute("npm view example", "network", "bash", { retryOnSandboxDenial: true })).disposition, "sandbox");
   assert.equal(runs, 2);
   assert.deepEqual(applied, [[], [{ kind: "network", resource: "registry.npmjs.org:443" }]]);
 });
@@ -397,7 +397,7 @@ test("unknown endpoints and unsupported runtimes cannot offer network widening",
       policy: new CapabilityPolicy([]),
       approvals: { request: async request => { assert.deepEqual(request.capabilities, []); return "deny"; } }
     });
-    assert.equal((await executor.execute("connect", "invalid")).disposition, "denied");
+    assert.equal((await executor.execute("connect", "invalid", "bash", { retryOnSandboxDenial: true })).disposition, "denied");
   }
 });
 
@@ -414,6 +414,6 @@ test("unsupported runtimes neither consume nor offer stored network grants", asy
     policy: new CapabilityPolicy([]),
     approvals: { request: async request => { assert.deepEqual(request.capabilities, []); return "deny"; } }
   });
-  assert.equal((await executor.execute("connect", "unsupported")).disposition, "denied");
+  assert.equal((await executor.execute("connect", "unsupported", "bash", { retryOnSandboxDenial: true })).disposition, "denied");
   assert.deepEqual(applied, []);
 });

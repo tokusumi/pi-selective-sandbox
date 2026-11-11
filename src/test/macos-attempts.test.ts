@@ -52,7 +52,7 @@ test("real macOS sequential file denials reach each approval UI for ordinary and
         return "Allow and retry";
       } } }, new SessionGrantStore())
     });
-    const result = await executor.execute(command, id);
+    const result = await executor.execute(command, id, "bash", { retryOnSandboxDenial: true });
     assert.equal(result.exitCode, 0, result.stderr);
     assert.equal(result.stdout.trim(), "opened-all");
     assert.equal(result.disposition, "sandbox");

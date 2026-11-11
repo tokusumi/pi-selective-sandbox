@@ -1,6 +1,7 @@
 import { ApprovalDiagnostics, approvalSelect, auditEvent, createDiagnosticFileSink, lookupResult, lookupStart, sessionPersistence, type ApprovalAudit } from "./approval-diagnostics.js";
 import { createSessionAuditSink, withSessionAuditLink } from "./session-audit.js";
 import { realpath } from "node:fs/promises";
+import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { debuglog } from "node:util";
@@ -28,7 +29,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentity } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
-import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, SkillAuthority } from "./types.js";
+import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, ExecutionResult, SkillAuthority } from "./types.js";
 
 const debug = debuglog("pi-selective-sandbox");
 type ApprovalUI = EscalationUI;
@@ -275,13 +276,24 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   });
   pi.registerTool({
     ...localBash,
+    parameters: Type.Object({
+      ...localBash.parameters.properties,
+      retryOnSandboxDenial: Type.Optional(Type.Boolean({ description: "Request the existing approval/retry flow after a correlated sandbox denial (default false). Not permission or proof of causality. The entire command may run again and repeat side effects." }))
+    }),
+    description: localBash.description + " Nonzero exits are returned unchanged, not diagnosed as sandbox failures. Correlated denials do not trigger approval or replay unless retryOnSandboxDenial is explicitly true.",
+    promptGuidelines: [
+      "For bash, inspect the command exit code and output separately from observed sandbox denials; correlation does not establish why a command exited.",
+      "Use bash retryOnSandboxDenial only when repeating the whole command to address denied access is appropriate, never merely because an exit is nonzero or a normal application state is still pending. Retry intent does not grant permission."
+    ],
     async execute(id, params, signal, onUpdate, context) {
+      const retryOnSandboxDenial = params.retryOnSandboxDenial === true;
       await ensureSetup(context);
       if (!await isEnabled(context)) {
         const hostBash = createBashTool(cwd, { operations: { exec: (command, commandCwd, opts) => runCommand(localOperations, command, commandCwd, opts) } });
         return redactToolResult(await hostBash.execute(id, params, signal, onUpdate));
       }
       await ensureRuntime();
+      let execution: ExecutionResult | undefined;
       const sandboxedBash = createBashTool(cwd, {
         operations: {
           async exec(command, commandCwd, options) {
@@ -347,14 +359,20 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               onDiagnostic: details => debug("%s", details),
               redactor: { redact: text => redact_text(text).redacted }
             });
-            const output = await executor.execute(command, id);
+            const output = await executor.execute(command, id, "bash", { retryOnSandboxDenial });
+            execution = output;
             emitExecutorOutput(output, options.onData);
             return { exitCode: output.exitCode };
           }
         }
       });
       const output = await sandboxedBash.execute(id, params, signal, onUpdate);
-      return redactToolResult(output);
+      // Preserve Pi's output/error/structured exit data. Only closed observation
+      // facts go in details; no new raw scope, message or command persistence.
+      return redactToolResult(execution ? { ...output, details: { ...output.details, selectiveSandbox: {
+        disposition: execution.disposition, denialObserved: execution.violations.length > 0,
+        retryNotRequested: execution.retryNotRequested === true
+      } } } : output);
     }
   });
   const approvalProvider = (context: unknown, signal?: AbortSignal) => createApprovalProvider(approvalContext({ ...context as ApprovalUI & { cwd?: string }, signal }), grants, project, hostGrants, gitWritePaths, diagnostics);

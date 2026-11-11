@@ -68,12 +68,12 @@ for (const duration of ["session", "project"] as const) {
     const target = join(parent, "file"), sibling = join(parent, "sibling");
     bashTarget = target;
     run.answers.push(parent, sandboxDuration, "Allow and retry");
-    assert.notEqual((await run.execute("bash", { command: "simulated write" })).isError, true);
+    assert.notEqual((await run.execute("bash", { command: "simulated write", retryOnSandboxDenial: true })).isError, true);
     assert.equal(attempts.length, 2);
     assert.deepEqual(attempts[1], [{ kind: "filesystem.write", resource: parent }]);
     const prompts = run.prompts.length;
     bashTarget = sibling;
-    assert.notEqual((await run.execute("bash", { command: "simulated sibling write" })).isError, true);
+    assert.notEqual((await run.execute("bash", { command: "simulated sibling write", retryOnSandboxDenial: true })).isError, true);
     assert.equal(run.prompts.length, prompts, "bash reuses the parent for another descendant");
     // Directory approval is not an exact native file approval.
     await assert.rejects(run.execute("write", { path: target, content: "denied" }), /Permission denied/);
@@ -93,7 +93,7 @@ for (const duration of ["session", "project"] as const) {
     await writeFile(bashLeaf, "before");
     bashTarget = bashLeaf;
     run.answers.push(bashLeaf, sandboxDuration, "Allow and retry");
-    await run.execute("bash", { command: "simulated leaf approval" });
+    await run.execute("bash", { command: "simulated leaf approval", retryOnSandboxDenial: true });
     const afterBashLeaf = run.prompts.length;
     await run.execute("edit", { path: bashLeaf, edits: [{ oldText: "before", newText: "after" }] });
     assert.equal(run.prompts.length, afterBashLeaf);
@@ -104,13 +104,13 @@ for (const duration of ["session", "project"] as const) {
     await run.execute("write", { path: leaf, content: "native" });
     const beforeBash = run.prompts.length;
     bashTarget = leaf;
-    assert.notEqual((await run.execute("bash", { command: "simulated exact write" })).isError, true);
+    assert.notEqual((await run.execute("bash", { command: "simulated exact write", retryOnSandboxDenial: true })).isError, true);
     assert.equal(run.prompts.length, beforeBash);
     bashTarget = `${leaf}-sibling`;
     // Deny the first scope selection rather than approving a wider path.
     run.answers.push("/"); // choose a valid ancestor, then deny duration
     run.answers.push("Once", "Deny");
-    assert.equal((await run.execute("bash", { command: "simulated unapproved write" })).isError, true);
+    assert.equal((await run.execute("bash", { command: "simulated unapproved write", retryOnSandboxDenial: true })).isError, true);
     await assert.rejects(run.execute("write", { path: `${leaf}-sibling`, content: "no" }), /Permission denied/);
 
     // A different child ID never inherits Session. Project reuse is deliberate.
@@ -119,11 +119,11 @@ for (const duration of ["session", "project"] as const) {
     if (duration === "session") {
       await assert.rejects(run.execute("write", { path: leaf, content: "no" }), /Permission denied/);
       bashTarget = target; run.answers.push(target, "Once", "Deny");
-      assert.equal((await run.execute("bash", { command: "simulated other child" })).isError, true);
+      assert.equal((await run.execute("bash", { command: "simulated other child", retryOnSandboxDenial: true })).isError, true);
     } else {
       await run.execute("write", { path: leaf, content: "project child" });
       bashTarget = target;
-      assert.notEqual((await run.execute("bash", { command: "simulated project child" })).isError, true);
+      assert.notEqual((await run.execute("bash", { command: "simulated project child", retryOnSandboxDenial: true })).isError, true);
       assert.equal(run.prompts.length, beforeChild);
     }
 
@@ -137,7 +137,7 @@ for (const duration of ["session", "project"] as const) {
     }
     bashTarget = target;
     if (duration === "session") reloaded.answers.push(target, "Once", "Deny");
-    assert.equal((await reloaded.execute("bash", { command: "simulated after reload" })).isError === true, duration === "session");
+    assert.equal((await reloaded.execute("bash", { command: "simulated after reload", retryOnSandboxDenial: true })).isError === true, duration === "session");
     // Another non-Git project cannot use this project's grants.
     const otherCwd = join(base, "other-workspace"); await mkdir(otherCwd);
     const otherProject = await start(otherCwd);
@@ -150,9 +150,9 @@ for (const duration of ["session", "project"] as const) {
     await assert.rejects(run.execute("write", { path: onceLeaf, content: "no" }), /Permission denied/);
     bashTarget = join(outside, "once-bash");
     run.answers.push(bashTarget, "Once", "Allow and retry");
-    await run.execute("bash", { command: "simulated once" });
+    await run.execute("bash", { command: "simulated once", retryOnSandboxDenial: true });
     run.answers.push(bashTarget, "Once", "Deny");
-    assert.equal((await run.execute("bash", { command: "simulated once expired" })).isError, true);
+    assert.equal((await run.execute("bash", { command: "simulated once expired", retryOnSandboxDenial: true })).isError, true);
 
     // Canonical symlink aliases reuse an exact target, but retargeting does not.
     run.session("child-A");
@@ -173,14 +173,14 @@ for (const duration of ["session", "project"] as const) {
         await assert.rejects(revoked.execute("write", { path: target, content: "no" }), /Permission denied/);
         bashTarget = target;
         revoked.answers.push(target, "Once", "Deny");
-        assert.equal((await revoked.execute("bash", { command: "simulated revoked" })).isError, true);
+        assert.equal((await revoked.execute("bash", { command: "simulated revoked", retryOnSandboxDenial: true })).isError, true);
       }
     }
 
     // Even a stored broad ancestor cannot authorize the private bridge root.
     bashTarget = join(outside, "root-probe");
     run.answers.push("/", sandboxDuration, "Allow and retry");
-    await run.execute("bash", { command: "simulated stored root approval" });
+    await run.execute("bash", { command: "simulated stored root approval", retryOnSandboxDenial: true });
     const beforePrivate = run.prompts.length;
     await assert.rejects(run.execute("write", { path: join(agent, "pi-selective-sandbox", "approvals", "tamper"), content: "no" }), /configured deny root/);
     assert.equal(run.prompts.length, beforePrivate);

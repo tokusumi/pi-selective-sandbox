@@ -9,7 +9,7 @@ const enums: Record<string, readonly string[]> = {
   outcome: ["hit", "miss", "skipped", "success", "error", "selected", "dismissed", "aborted", "timeout", "unavailable", "deny", "allow"],
   authority: ["resource", "host"], duration: ["once", "session", "project"], renderer: ["local", "parent", "bridge"],
   stage: ["scope", "duration", "action", "host-duration", "host-confirm", "native", "custom"], relation: ["first", "same", "new", "mixed"],
-  reason: ["headless", "aborted", "covered", "limit", "policy", "widen", "host"], execution: ["sandbox", "host"],
+  reason: ["headless", "aborted", "covered", "limit", "policy", "widen", "host", "not-requested"], execution: ["sandbox", "host"],
   disposition: ["sandbox", "host", "denied", "sandbox-unavailable"],
 };
 const unavailableReasons = ["filesystem-write-scope-unavailable", "network-runtime-unsupported", "network-target-unavailable", "filesystem-read-unsupported", "no-additional-scope"];
@@ -59,7 +59,7 @@ export function createSessionAuditSink(append: (type: string, data: unknown) => 
   let started = false, closed = false, stopped = false, bytes = 0, count = 0;
   const status = (value: "recording" | "truncated" | "write-error") => {
     try { append(SESSION_AUDIT_STATUS_TYPE, { version: 1, originId, status: value, maxBytes, maxEvents, bytes, events: count,
-      features: ["opaque-call-link", "network-reasons", "attempt-results"] }); } catch { /* Best effort even if session persistence is unavailable. */ }
+      features: ["opaque-call-link", "network-reasons", "attempt-results", "retry-intent"] }); } catch { /* Best effort even if session persistence is unavailable. */ }
   };
   return {
     start() { if (started || closed) return; started = true; status("recording"); },

@@ -76,9 +76,11 @@ bridge の相関 metadata は UUID / HMAC token / 小さい整数 / 固定 enum 
 | `persist` | resource/host と session/project の保存成功・失敗。session はメモリ保存、project は既存 store の保存処理。Once は保存しない |
 | `provider.response` | 最終 allow / deny / aborted / error。allow の authority と duration、選択された scope identity |
 | `attempt.denial` | observed targets と直前の比較。`network` に opaque id、固定 reason/family の分類を追加 |
-| `retry` | widen / host replay、covered-only / policy / limit による抑止、または承認拒否。実行許可の判断は既存処理のまま |
+| `retry` | Widening / host replay, suppression because retry was not requested or because of coverage / policy / limits, or rejected approval. `not-requested` means the provider was not called; it is not an approval denial. |
 | `attempt.result` | sandbox / explicit host replay の終了コードと success/error。host runner の例外は error のみ（本文なし） |
 | `operation.end` | 通常 return の最終 disposition と終了コード。host runner 例外も記録。その他の例外や shutdown によって欠ける場合がある |
+
+Manifests advertising `retry-intent` support [per-invocation retry requests](../SPEC.md#5-bash-execution-flow). Without explicit bash retry intent, `attempt.denial` is followed by `retry / skipped / not-requested`, without entering the provider or selectors. Initial `grant.load` still runs. Process success/error does not classify CI state or establish that a denial caused the exit. The bash lookup order below applies only to opted-in retries; native preflight is unchanged.
 
 lookup 順序は host-project → host-session → resource-project → resource-session（native は resource のみ）。最初の hit で short circuit するため、後続にイベントがないことを miss と解釈しない。eligibility がなければ skipped。lookup 自体が throw した場合は error として記録し、元の例外をそのまま伝播する。store が元々内部で read error を空集合扱いする場合は既存の意味で miss となるので、disk 健全性までは証明しない。
 

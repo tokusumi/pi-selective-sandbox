@@ -21,7 +21,7 @@ const unavailableMessages = {
 function hostOnlySummary(request: EscalationApprovalRequest): string {
   const targets = request.observedCapabilities ?? [];
   return [
-    "Sandbox blocked this operation.", "", "Observed sandbox denials",
+    "Sandbox denials were observed during this attempt.", "", "Observed sandbox denials",
     ...targets.flatMap(target => [`  ${target.kind}: ${displayText(target.resource)}`, ...(target.message ? [`    ${displayText(target.message)}`] : [])]),
     ...(targets.length === 0 ? ["  No target details are available."] : []),
     "", "Why sandbox retry is unavailable",

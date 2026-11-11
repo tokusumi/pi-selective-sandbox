@@ -45,7 +45,7 @@ async function scenario(violations: readonly SandboxViolation[], options: {
       return options.response ?? provider.request(request);
     } }
   });
-  const result = await executor.execute(command, "pr-view");
+  const result = await executor.execute(command, "pr-view", "bash", { retryOnSandboxDenial: true });
   return { result, titles, markers, sandboxCommands, hostCommands, requests, applied };
 }
 
