@@ -16,8 +16,11 @@ export type SandboxViolation = Capability & { message?: string };
 export type NetworkDiagnostic = { id: string; reason: "proxy-allowlist" | "proxy-address-guard" | "proxy-host-invalid" | "unix-socket" | "raw-socket" | "unknown";
   family: "github" | "github-actions" | "go" | "aws" | "terraform" | "other" };
 
+/** Correlated operations that are explainable, but are not approvable resource capabilities. */
+export type UnsupportedCommunicationDenial = { operation: "system-socket" | "mach-lookup"; target?: string; family?: "unix" };
+
 /** Observation metadata is diagnostic only, never evidence for an approval. */
-export type SandboxObservationDiagnostic = { details: string; warning?: string };
+export type SandboxObservationDiagnostic = { details: string; warning?: string; communicationDenials?: readonly UnsupportedCommunicationDenial[] };
 
 export type CommandResult = {
   exitCode: number;

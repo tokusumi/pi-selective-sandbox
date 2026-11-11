@@ -147,6 +147,12 @@ scope preparation rejection), and offers only denial or separately confirmed
 exact-command host replay. A correlated denial is not proof of the cause of a
 TLS certificate error; TLS error text alone never requests approval.
 
+Bash results include a model-visible `<sandbox-denial-report>` JSON block,
+including in headless mode. It distinguishes proxy network denials, local IPC,
+and unknown evidence, with observed targets and next steps. Reports grant no
+authority; IPC access is not implicitly trusted or treated as read-only.
+Unlike the audit records below, these reports can contain paths/endpoints.
+
 Each macOS attempt has its own authenticated HTTP/SOCKS proxy. Approvals do not
 leak into concurrent commands or change the SDK's global allowlist. The proxy
 closes when the attempt ends, including open connections and background
@@ -343,7 +349,7 @@ with `PI_SELECTIVE_SANDBOX_SESSION_AUDIT=0`.
 
 The existing `PI_SELECTIVE_SANDBOX_APPROVAL_DIAGNOSTICS=1` option additionally
 writes private diagnostic JSONL files; it is not required for session history.
-See [schema, privacy, limits and aggregation](docs/approval-diagnostics.md).
+See [audit storage and limits](SPEC.md#approval-audit-storage).
 
 ## Development
 

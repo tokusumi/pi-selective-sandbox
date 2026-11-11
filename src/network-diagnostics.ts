@@ -13,17 +13,21 @@ function family(endpoint: string | undefined): NetworkDiagnostic["family"] {
 }
 
 /** Classify only correlated observer messages, never shell stderr or guessed command destinations. */
+export function networkDenialReason(violation: SandboxViolation): NetworkDiagnostic["reason"] {
+  if (violation.kind !== "network") return "unknown";
+  const message = violation.message ?? "";
+  const endpoint = canonicalNetworkEndpoint(violation.resource);
+  if (/\bdeny network-outbound \S+:\d+ \(host is not on the allow list\)$/.test(message) && endpoint) return "proxy-allowlist";
+  if (/\bdeny network-outbound \S+:\d+ \(malformed host\)$/.test(message)) return "proxy-host-invalid";
+  if (/\bdeny network-outbound \S+:\d+ \(resolved to [^\n]+\)$/.test(message)) return "proxy-address-guard";
+  if (/\bdeny(?:\(\d+\))?\s+network-(?:bind|outbound|inbound)\b/.test(message)) {
+    return violation.resource.startsWith("/") || violation.resource.startsWith("~/") ? "unix-socket" : "raw-socket";
+  }
+  return "unknown";
+}
+
 export function networkDiagnostics(violations: readonly SandboxViolation[], identity: (resource: string) => string): NetworkDiagnostic[] {
-  return violations.filter(v => v.kind === "network").map(v => {
-    const message = v.message ?? "";
-    const endpoint = canonicalNetworkEndpoint(v.resource);
-    let reason: NetworkDiagnostic["reason"] = "unknown";
-    if (/\bdeny network-outbound \S+:\d+ \(host is not on the allow list\)$/.test(message) && endpoint) reason = "proxy-allowlist";
-    else if (/\bdeny network-outbound \S+:\d+ \(malformed host\)$/.test(message)) reason = "proxy-host-invalid";
-    else if (/\bdeny network-outbound \S+:\d+ \(resolved to [^\n]+\)$/.test(message)) reason = "proxy-address-guard";
-    else if (/\bdeny(?:\(\d+\))?\s+network-(?:bind|outbound|inbound)\b/.test(message)) {
-      reason = v.resource.startsWith("/") || v.resource.startsWith("~/") ? "unix-socket" : "raw-socket";
-    }
-    return { id: identity(v.resource), reason, family: family(endpoint) };
-  });
+  return violations.filter(v => v.kind === "network").map(v => ({
+    id: identity(v.resource), reason: networkDenialReason(v), family: family(canonicalNetworkEndpoint(v.resource))
+  }));
 }

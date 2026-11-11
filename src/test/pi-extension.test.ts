@@ -174,6 +174,42 @@ test("an explicitly false macOS SDK monitor flag forces all tools off and blocks
   }
 });
 
+test("headless bash result exposes actionable communication reports to the model, not only approval UI", async t => {
+  const base = await mkdtemp(join(tmpdir(), "pi-denial-output-"));
+  const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = base;
+  t.after(async () => {
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    await rm(base, { recursive: true, force: true });
+  });
+  let wraps = 0;
+  const runtime: SandboxRuntime = {
+    supportsNetworkWidening: true,
+    // Harmless fixture command: no actual IPC, external networking, or host daemon.
+    wrap: async () => { wraps++; return "printf fixture-error; exit 1"; },
+    getViolationsForCommand: () => [
+      { kind: "network", resource: "/fixture/tmux/default", message: "tmux(123) deny(1) network-outbound /fixture/tmux/default" },
+      { kind: "network", resource: "api.example.com:443", message: "deny network-outbound api.example.com:443 (host is not on the allow list)" }
+    ]
+  };
+  t.mock.method(AnthropicSandboxRuntime, "initialize", async () => runtime as AnthropicSandboxRuntime);
+  const tools = new Map<string, ToolDefinition>();
+  await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined,
+    registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); }
+  } as never);
+  const output = await tools.get("bash")!.execute("denial-output", { command: "fixture" }, new AbortController().signal, () => {}, { cwd: process.cwd(), hasUI: false } as never);
+  const text = output.content.filter(c => c.type === "text").map(c => c.text).join("");
+  const match = text.match(/<sandbox-denial-report>\n([^\n]+)\n<\/sandbox-denial-report>/);
+  assert.ok(match, "report must be in model-visible text, not only details/debug/UI");
+  const report = JSON.parse(match[1]);
+  assert.deepEqual(report.denials.map((d: { category: string }) => d.category), ["local-ipc", "external-network"]);
+  assert.equal(report.denials[0].sandboxRetry, "unavailable");
+  assert.equal(report.denials[1].sandboxRetry, "resource-approval");
+  assert.equal(wraps, 1);
+  assert.match(text, /approval-denied/);
+});
+
 test("a running extension refreshes project capabilities for each bash invocation", async t => {
   const base = await mkdtemp(join(tmpdir(), "pi-extension-grant-refresh-"));
   const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
