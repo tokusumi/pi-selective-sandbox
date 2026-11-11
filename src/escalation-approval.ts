@@ -1,5 +1,6 @@
 import { approvalSelect, auditEvent, lookupResult, lookupStart, sessionPersistence } from "./approval-diagnostics.js";
 import { pathContains, type GitWritePaths } from "./git-write-paths.js";
+import { networkDenialReason } from "./network-diagnostics.js";
 import { collapseWriteScopes, validateWideningSelection } from "./resource-selection.js";
 import { displayText, durationLabels, showWideningDialog, type ApprovalDuration, type EscalationUI, type WideningDialogOptions } from "./widening-dialog.js";
 import type { ProjectGrantStore } from "./project-grants.js";
@@ -22,7 +23,20 @@ function hostOnlySummary(request: EscalationApprovalRequest): string {
   const targets = request.observedCapabilities ?? [];
   return [
     "Sandbox denials were observed during this attempt.", "", "Observed sandbox denials",
-    ...targets.flatMap(target => [`  ${target.kind}: ${displayText(target.resource)}`, ...(target.message ? [`    ${displayText(target.message)}`] : [])]),
+    ...targets.flatMap(target => {
+      const lines = [`  ${target.kind}: ${displayText(target.resource)}`];
+      const reason = networkDenialReason(target);
+      if (reason === "unix-socket") {
+        lines.push(
+          "    Local IPC (Unix socket), not external HTTP access. A host:port allowance cannot authorize this socket.",
+          "    For example, tmux socket access can control a host-side server and may enable arbitrary host commands; it is not a harmless network lookup."
+        );
+      } else if (target.kind === "network" && reason === "unknown") {
+        lines.push("    Denial target/type is unknown; do not infer local IPC or an external HTTP destination from the command or stderr.");
+      }
+      if (target.message) lines.push(`    ${displayText(target.message)}`);
+      return lines;
+    }),
     ...(targets.length === 0 ? ["  No target details are available."] : []),
     "", "Why sandbox retry is unavailable",
     ...(request.wideningUnavailableReasons?.length ? request.wideningUnavailableReasons.map(reason => unavailableMessages[reason])

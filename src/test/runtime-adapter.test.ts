@@ -155,11 +155,36 @@ test("invalid delayed SDK data rejects observation and releases the subscription
   assert.equal(listeners, 0);
 });
 
+test("socket creation and Mach denials are diagnostic-only, correlated, and never inferred from the command", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  record("unrelated", "tmux(999) deny(1) system-socket AF_UNIX");
+  for (const [id, line, expected] of [
+    ["unix-create", "tmux(123) deny(1) system-socket AF_UNIX", { operation: "system-socket", family: "unix" }],
+    ["unknown-create", "tmux(123) deny(1) system-socket unknown", { operation: "system-socket" }],
+    ["process-name-not-evidence", "AF_UNIX(123) deny(1) system-socket unknown", { operation: "system-socket" }],
+    ["mach", "helper(123) deny(1) mach-lookup example.service", { operation: "mach-lookup", target: "example.service" }]
+  ] as const) {
+    record(id, line);
+    const pending = runtime.getViolationsForCommand(id);
+    t.mock.timers.tick(1000);
+    assert.deepEqual(await pending, [], "diagnostic-only denials must not become grant/host-replay triggers");
+    assert.deepEqual(runtime.getObservationDiagnostic(id)?.communicationDenials, [expected]);
+    await runtime.forgetCommand(id);
+    assert.equal(runtime.getObservationDiagnostic(id), undefined);
+  }
+  record("mixed", "helper(123) deny(1) mach-lookup example.service");
+  record("mixed", "helper(123) deny(1) network-outbound /fixture/local.sock");
+  assert.equal((await runtime.getViolationsForCommand("mixed"))[0].resource, "/fixture/local.sock");
+  assert.deepEqual(runtime.getObservationDiagnostic("mixed")?.communicationDenials, [{ operation: "mach-lookup", target: "example.service" }]);
+});
+
 test("read and network operations are classified independently of path keywords", async t => {
   const { runtime, record, store } = await macOSFixture(t);
   for (const [operation, resource, kind] of [
     ["file-read-data", "/Users/test/network/config", "filesystem.read"],
-    ["network-outbound", "/Users/test/threads/socket", "network"]
+    ["network-outbound", "/Users/test/threads/socket", "network"],
+    ["network-outbound", "/fixture/local IPC/socket with spaces", "network"]
   ]) {
     store.clear();
     record("classification", `bash(123) deny(1) ${operation} ${resource}`);

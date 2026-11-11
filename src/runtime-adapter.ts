@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { WritePolicy } from "./filesystem-policy.js";
 import { StraceViolationObserver, STRACE_ARGS, STRACE_BINARY } from "./strace-observer.js";
-import type { SandboxObservationDiagnostic, SandboxRuntime, SandboxViolation } from "./types.js";
+import type { SandboxObservationDiagnostic, SandboxRuntime, SandboxViolation, UnsupportedCommunicationDenial } from "./types.js";
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
@@ -114,6 +114,8 @@ export function sandboxInitializationError(error: unknown): string {
 function resourceFromLine(line: string): string {
   const filesystem = line.match(/\bdeny(?:\(\d+\))?\s+file-(?:read|write)(?:-[\w-]+)?\s+(.+)$/)?.[1];
   if (filesystem) return filesystem.replace(/^(['"])(.*)\1$/, "$2");
+  const unixSocket = line.match(/\bdeny(?:\(\d+\))?\s+network-(?:bind|outbound|inbound)\s+(["']?(?:\/|~\/)[^\n]*)$/)?.[1];
+  if (unixSocket) return unixSocket.replace(/^(['"])(.*)\1$/, "$2");
   const quoted = line.match(/['"]((?:\/|~\/)[^'"\s]+)['"]/);
   const path = quoted ?? line.match(/((?:\/|~\/)[^\s,;]+)/);
   return path?.[1] ?? "unknown";
@@ -229,18 +231,34 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     const observer = this.strace.get(commandId);
     this.strace.delete(commandId);
     const store = sharedRuntime().manager.getSandboxViolationStore();
-    const read = (): SandboxViolation[] => store.getViolationsForCommand(this.commandKey(commandId)).flatMap(event => {
-      // Seatbelt also reports sysctl/Mach noise, which is not a supported
-      // filesystem or network capability and must not become "unknown" writes.
-      if (process.platform === "darwin" && !/^(?:file-(?:read|write)(?:-|$)|network(?:-|$)|http-request$)/i.test(operationFromLine(event.line))) return [];
-      let raw = event.line;
-      if (process.platform === "darwin") {
-        if (typeof event.rawLine !== "string") throw new Error("SDK raw violation data is unavailable. Reinstall dependencies with lifecycle scripts enabled.");
-        raw = event.rawLine;
-        if (/[\x00-\x1f\x7f-\x9f]/.test(raw)) throw new Error("SDK violation contains unsupported control characters; resource approval was not attempted.");
-      }
-      return [{ ...violationFromLine(raw), message: event.line }];
-    });
+    let communicationDenials: UnsupportedCommunicationDenial[] = [];
+    const read = (): SandboxViolation[] => {
+      communicationDenials = [];
+      return store.getViolationsForCommand(this.commandKey(commandId)).flatMap(event => {
+        const operation = operationFromLine(event.line);
+        const diagnosticOnly = process.platform === "darwin" && (operation === "system-socket" || operation === "mach-lookup");
+        // Unsupported IPC is explained separately, never converted into a write,
+        // resource grant, or new host-replay trigger. Ignore unrelated sysctl noise.
+        if (process.platform === "darwin" && !diagnosticOnly && !/^(?:file-(?:read|write)(?:-|$)|network(?:-|$)|http-request$)/i.test(operation)) return [];
+        let raw = event.line;
+        if (process.platform === "darwin") {
+          if (typeof event.rawLine !== "string") throw new Error("SDK raw violation data is unavailable. Reinstall dependencies with lifecycle scripts enabled.");
+          raw = event.rawLine;
+          if (/[\x00-\x1f\x7f-\x9f]/.test(raw)) throw new Error("SDK violation contains unsupported control characters; resource approval was not attempted.");
+        }
+        if (diagnosticOnly) {
+          if (operation === "mach-lookup") {
+            const target = raw.match(/\bdeny(?:\(\d+\))?\s+mach-lookup\s+(.+)$/)?.[1];
+            communicationDenials.push({ operation, ...(target ? { target } : {}) });
+          } else {
+            const socketDetails = raw.match(/\bdeny(?:\(\d+\))?\s+system-socket(?:\s+(.*))?$/)?.[1] ?? "";
+            communicationDenials.push({ operation: "system-socket", ...(/\b(?:AF_UNIX|PF_UNIX)\b/.test(socketDetails) ? { family: "unix" as const } : {}) });
+          }
+          return [];
+        }
+        return [{ ...violationFromLine(raw), message: event.line }];
+      });
+    };
     let upstream = read();
     if (process.platform === "darwin" && this.logMonitorEnabled && upstream.length === 0) {
       // SDK log events can arrive after process exit. Only this invocation's
@@ -270,6 +288,9 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         } catch (error) { finish([], error); }
       });
     }
+    if (communicationDenials.length > 0) this.observationDiagnostics.set(commandId, {
+      details: "Correlated unsupported communication denials are diagnostic only; no permission was inferred.", communicationDenials
+    });
     if (process.platform === "darwin" && upstream.length === 0) {
       const key = this.commandKey(commandId);
       const matchingEvents = store.getViolationsForCommand(key).length;
@@ -277,6 +298,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       const atStart = this.monitorAtStart.get(commandId);
       const failedAtStart = atStart && ["error", "exited", "stopped"].includes(atStart.state);
       this.observationDiagnostics.set(commandId, {
+        ...(communicationDenials.length ? { communicationDenials } : {}),
         details: `Sandbox observation unconfirmed: key=${key}; waitMs=${this.logMonitorEnabled ? MACOS_DENIAL_WAIT_MS : 0}; configured=${this.logMonitorEnabled}; matchingEvents=${matchingEvents}; monitorAtStart=${JSON.stringify(atStart ?? null)}; monitor=${JSON.stringify(monitor)}. ` +
           "No supported denial was observed before the deadline. EPERM alone does not identify a permission resource; no permission was inferred and host execution was not attempted. Compare this key with an independent host log capture and check the monitor state and counters.",
         ...(monitor.state !== "running" || failedAtStart ? {

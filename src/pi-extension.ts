@@ -357,6 +357,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               commandIdentity: async shellCommand => { try { return { shellCommand, cwd: await realpath(commandCwd), executionMode: "shell" }; } catch { return undefined; } },
               onStatus: marker => emitSandboxStatus(marker, options.onData),
               onDiagnostic: details => debug("%s", details),
+              onDenialReport: report => emitSandboxStatus(report, options.onData),
               redactor: { redact: text => redact_text(text).redacted }
             });
             const output = await executor.execute(command, id, "bash", { retryOnSandboxDenial });

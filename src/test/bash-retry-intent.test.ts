@@ -99,7 +99,12 @@ test("registered bash exposes a default-off boolean intent and preserves streame
     assert.deepEqual((output.details as any).selectiveSandbox, {
       disposition: "sandbox", denialObserved: sample.result.exitCode !== 0, retryNotRequested: sample.result.exitCode !== 0
     });
-    if (sample.result.exitCode !== 0) assert.match(text, /denial-observed retry-not-requested/);
+    if (sample.result.exitCode !== 0) {
+      assert.match(text, /denial-observed retry-not-requested/);
+      const report = text.match(/<sandbox-denial-report>\n([^\n]+)\n<\/sandbox-denial-report>/);
+      assert.ok(report, "default-off calls retain upstream's model-visible diagnosis");
+      assert.equal(JSON.parse(report[1]).denials[0].sandboxRetry, "not-requested");
+    }
     assert.doesNotMatch(JSON.stringify(output), /private denial fixture/);
     assert.equal(f.spawned.length, before + 1);
     assert.equal(f.spawned.at(-1), "fixture wrapped command");
