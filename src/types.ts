@@ -82,4 +82,12 @@ export type ActiveSkill = { id: string; root: string; helperRoots?: readonly str
 export type SkillAuthority = { getActiveSkills(): Promise<readonly ActiveSkill[]> };
 export type Redactor = { redact(text: string): string };
 
-export type ExecutionResult = CommandResult & { disposition: "sandbox" | "host" | "denied" | "sandbox-unavailable"; violations: readonly SandboxViolation[]; };
+/** Retry intent is per invocation, not permission and not evidence of failure causality. */
+export type SandboxExecutionOptions = { retryOnSandboxDenial?: boolean };
+
+export type ExecutionResult = CommandResult & {
+  disposition: "sandbox" | "host" | "denied" | "sandbox-unavailable";
+  violations: readonly SandboxViolation[];
+  /** Observations were returned without entering approval or retry. */
+  retryNotRequested?: true;
+};

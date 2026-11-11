@@ -47,7 +47,7 @@ async function runScenario({ initialExit, initialOutput, retryExit, replayExit, 
     commandIdentity: async shellCommand => ({ shellCommand, cwd: "/project", executionMode: "shell" }),
     onStatus: marker => stream(`${marker}\n`)
   });
-  const output = await executor.execute("git add .", "call");
+  const output = await executor.execute("git add .", "call", "bash", { retryOnSandboxDenial: true });
   return { output, transcript: transcript.join(""), events: events.join(""), sandboxRuns, hostRuns };
 }
 

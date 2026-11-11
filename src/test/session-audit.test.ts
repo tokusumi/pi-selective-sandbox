@@ -95,7 +95,7 @@ test("failed host replay and denial type can be reconstructed from persisted saf
     wrap: async () => "fixture", forgetCommand() {}, getViolationsForCommand: () => [{ kind: "network", resource: `/private/${secret}.sock`, message: `deny(1) network-bind /private/${secret}.sock` }] },
     runner: { runSandbox: async () => ({ exitCode: ++attempt, stdout: "", stderr: secret }), runHost: async () => ({ exitCode: 7, stdout: "", stderr: secret }) },
     policy: new CapabilityPolicy([], "ask"), approvals: { request: async () => "host-allow-once" } });
-  const output = await executor.execute(secret, secret);
+  const output = await executor.execute(secret, secret, "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "host"); assert.equal(output.exitCode, 7);
   const events = rows.filter(row => row.customType === SESSION_AUDIT_TYPE).map(row => row.data as ApprovalDiagnosticEvent);
   assert.ok(events.some(e => e.event === "attempt.denial" && e.network?.[0].reason === "unix-socket"));
@@ -160,7 +160,7 @@ test("concurrent operations keep independent opaque tool links and final outcome
     wrap: async () => "fixture", forgetCommand() {}, getViolationsForCommand: () => [{ kind: "network", resource: "unknown" }] },
     runner: { runSandbox: async () => ({ exitCode: 1, stdout: "", stderr: "" }), runHost: async () => assert.fail("host") },
     policy: new CapabilityPolicy([], "deny") });
-  await Promise.all([executor.execute(secret, secret + "-one"), executor.execute(secret, secret + "-two")]);
+  await Promise.all([executor.execute(secret, secret + "-one", "bash", { retryOnSandboxDenial: true }), executor.execute(secret, secret + "-two", "bash", { retryOnSandboxDenial: true })]);
   const ends = rows.filter(row => row.customType === SESSION_AUDIT_TYPE).map(row => row.data as ApprovalDiagnosticEvent).filter(e => e.event === "operation.end");
   assert.equal(ends.length, 2); assert.equal(new Set(ends.map(e => e.operationId)).size, 2);
   assert.equal(new Set(ends.map(e => e.callId)).size, 2);
@@ -174,7 +174,7 @@ test("a thrown host runner error is recorded without its text and propagates unc
     wrap: async () => "fixture", forgetCommand() {}, getViolationsForCommand: () => [{ kind: "network", resource: "unknown" }] },
     runner: { runSandbox: async () => ({ exitCode: 1, stdout: "", stderr: "" }), runHost: async () => { throw error; } },
     policy: new CapabilityPolicy([], "ask"), approvals: { request: async () => "host-allow-once" } });
-  await assert.rejects(executor.execute(secret, secret), e => e === error);
+  await assert.rejects(executor.execute(secret, secret, "bash", { retryOnSandboxDenial: true }), e => e === error);
   const events = rows.filter(row => row.customType === SESSION_AUDIT_TYPE).map(row => row.data as ApprovalDiagnosticEvent);
   assert.ok(events.some(e => e.event === "attempt.result" && e.execution === "host" && e.outcome === "error" && e.exitCode === undefined));
   assert.ok(events.some(e => e.event === "operation.end" && e.disposition === "host" && e.outcome === "error"));

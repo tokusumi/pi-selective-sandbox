@@ -108,7 +108,7 @@ test("write denials offer resource widening for ordinary and subagent tool IDs",
         return "Allow and retry";
       } } }, new SessionGrantStore())
     });
-    assert.equal((await executor.execute("touch file", id)).exitCode, 0);
+    assert.equal((await executor.execute("touch file", id, "bash", { retryOnSandboxDenial: true })).exitCode, 0);
     assert.equal(attempts, 2);
     assert.equal(prompts, 3);
     assert.equal(hostCalls, 0);

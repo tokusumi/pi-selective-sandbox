@@ -198,7 +198,7 @@ test("headless bash result exposes actionable communication reports to the model
   await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined,
     registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); }
   } as never);
-  const output = await tools.get("bash")!.execute("denial-output", { command: "fixture" }, new AbortController().signal, () => {}, { cwd: process.cwd(), hasUI: false } as never);
+  const output = await tools.get("bash")!.execute("denial-output", { command: "fixture", retryOnSandboxDenial: true }, new AbortController().signal, () => {}, { cwd: process.cwd(), hasUI: false } as never);
   const text = output.content.filter(c => c.type === "text").map(c => c.text).join("");
   const match = text.match(/<sandbox-denial-report>\n([^\n]+)\n<\/sandbox-denial-report>/);
   assert.ok(match, "report must be in model-visible text, not only details/debug/UI");

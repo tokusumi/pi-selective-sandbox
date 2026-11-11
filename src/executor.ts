@@ -7,7 +7,7 @@ import { findTrustedHelper } from "./skills.js";
 import { canonicalNetworkEndpoint } from "./network-policy.js";
 import { networkDiagnostics } from "./network-diagnostics.js";
 import { sandboxDenialReport, renderSandboxDenialReport, type DenialExplanationContext } from "./denial-explanation.js";
-import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxObservationDiagnostic, SandboxRuntime, SkillAuthority, WideningUnavailableReason } from "./types.js";
+import type { ApprovalProvider, Capability, CommandResult, CommandRunner, CommandIdentity, EscalationPolicy, ExecutionResult, Redactor, SandboxObservationDiagnostic, SandboxRuntime, SkillAuthority, WideningUnavailableReason, SandboxExecutionOptions } from "./types.js";
 
 export type SelectiveSandboxOptions = { diagnostics?: ApprovalDiagnostics; diagnosticActor?: "parent" | "child"; runtime?: SandboxRuntime; cwd?: string; sandboxUnavailableMessage?: string | ((error?: unknown) => string); runner: CommandRunner; policy: EscalationPolicy; approvals?: ApprovalProvider; skills?: SkillAuthority; redactor?: Redactor; onStatus?: (marker: string) => void; onDiagnostic?: (details: string) => void; onDenialReport?: (report: string) => void; trustedHelpersAutoApprove?: boolean; getSandboxCapabilities?: (trace?: ApprovalTrace) => Promise<readonly Capability[]>; canonicalizeCapabilities?: (c: readonly Capability[]) => Promise<readonly Capability[] | undefined>; commandIdentity?: (c: string) => Promise<CommandIdentity | undefined> };
 const MAX_SANDBOX_APPROVALS = 16;
@@ -15,7 +15,8 @@ const digest = (v: string) => createHash("sha256").update(v).digest("hex");
 const redact = (r: CommandResult, redactor?: Redactor): CommandResult => !redactor ? r : { ...r, stdout: redactor.redact(r.stdout), stderr: redactor.redact(r.stderr) };
 
 export class SelectiveSandboxExecutor { constructor(private readonly options: SelectiveSandboxOptions) {}
-  async execute(command: string, toolCallId: string, toolName = "bash"): Promise<ExecutionResult> {
+  async execute(command: string, toolCallId: string, toolName = "bash", options: SandboxExecutionOptions = {}): Promise<ExecutionResult> {
+    const retryRequested = options.retryOnSandboxDenial === true;
     const { runtime, runner, policy, approvals, skills } = this.options;
     const diagnostics = this.options.diagnostics;
     const operationId = diagnostics ? randomUUID() : undefined;
@@ -71,6 +72,16 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       if (trace) diagnostics!.emit(trace, { event: "attempt.denial", observed: targetIds, relation,
         network: networkDiagnostics(observed, resource => diagnostics!.token("scope", `network\0${resource}`)) });
       lastTargets = currentTargets;
+      // A nonzero exit and correlated denial do not establish that replay is
+      // useful. Return the command result unless THIS invocation requested it.
+      // Gate before scope preparation and provider lookup (including host grants).
+      if (!retryRequested) {
+        this.explainDenials(observed, { attempt: approvalsUsed, supportsNetworkWidening: runtime.supportsNetworkWidening === true,
+          candidates: [], granted, observation: observationDiagnostic, retryNotRequested: true });
+        if (trace) diagnostics!.emit(trace, { event: "retry", reason: "not-requested", outcome: "skipped", relation });
+        this.status("denial-observed retry-not-requested");
+        return complete({ ...this.finish(attempt, "sandbox", observed), retryNotRequested: true });
+      }
       const writeCandidates = observed.filter(violation => violation.kind === "filesystem.write");
       const prepared = writeCandidates.length ? await (this.options.canonicalizeCapabilities?.(writeCandidates) ?? writeCandidates) : [];
       const wideningBlocked = prepared === undefined;

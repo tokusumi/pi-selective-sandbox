@@ -22,7 +22,7 @@ const unavailableMessages = {
 function hostOnlySummary(request: EscalationApprovalRequest): string {
   const targets = request.observedCapabilities ?? [];
   return [
-    "Sandbox blocked this operation.", "", "Observed sandbox denials",
+    "Sandbox denials were observed during this attempt.", "", "Observed sandbox denials",
     ...targets.flatMap(target => {
       const lines = [`  ${target.kind}: ${displayText(target.resource)}`];
       const reason = networkDenialReason(target);

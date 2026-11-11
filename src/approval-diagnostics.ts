@@ -26,7 +26,7 @@ export type DiagnosticFields = {
   disposition?: "sandbox" | "host" | "denied" | "sandbox-unavailable";
   exitCode?: number;
   relation?: "first" | "same" | "new" | "mixed";
-  reason?: "headless" | "aborted" | "covered" | "limit" | "policy" | "widen" | "host";
+  reason?: "headless" | "aborted" | "covered" | "limit" | "policy" | "widen" | "host" | "not-requested";
 };
 export type ApprovalDiagnosticEvent = ApprovalTrace & DiagnosticFields & { version: 1; emitterId: string; sequence: number; time: number };
 export type DiagnosticSink = (event: ApprovalDiagnosticEvent) => unknown;

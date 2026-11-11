@@ -100,7 +100,7 @@ test("real SDK tags/monitor/store and runtime/executor wait for each fresh denia
         return "Allow and retry";
       } } }, new SessionGrantStore())
     });
-    const result = await executor.execute("helper writes three files", id);
+    const result = await executor.execute("helper writes three files", id, "bash", { retryOnSandboxDenial: true });
     assert.equal(result.exitCode, 0);
     assert.equal(result.disposition, "sandbox");
     assert.equal(attempts, 4);

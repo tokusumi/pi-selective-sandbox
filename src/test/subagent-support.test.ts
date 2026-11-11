@@ -78,7 +78,7 @@ test("required child extensions carry parent-specific routing and filesystem/net
   await child.handlers.get("session_start")!({}, context);
   assert.equal(registered.length, 1, "a headless child cannot replace its inherited parent endpoint");
   const signal = new AbortController().signal;
-  const result = await child.tools.get("bash")!.execute("same-tool-id", { command: "probe" }, signal, () => {}, context as never);
+  const result = await child.tools.get("bash")!.execute("same-tool-id", { command: "probe", retryOnSandboxDenial: true }, signal, () => {}, context as never);
   assert.match(JSON.stringify(result.content), /child-approved/);
   assert.equal(settings?.cwd, join(base, "child"));
   assert.deepEqual(settings?.allowedDomains, ["configured.example:8443"]);

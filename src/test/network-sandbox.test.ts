@@ -113,7 +113,7 @@ test("macOS strict local policy retains filesystem isolation during endpoint wid
       return "sandbox-allow-once";
     }
   } });
-  const output = await executor.execute(command, "real-network");
+  const output = await executor.execute(command, "real-network", "bash", { retryOnSandboxDenial: true });
   assert.equal(output.disposition, "sandbox");
   assert.equal(output.exitCode, 0, output.stderr);
   assert.equal(output.stdout, "sandbox-network-ok");
@@ -122,7 +122,7 @@ test("macOS strict local policy retains filesystem isolation during endpoint wid
 
   // Once grants disappear on the next invocation, even for the same endpoint.
   const unapproved = new SelectiveSandboxExecutor({ runtime, cwd, runner, policy: new CapabilityPolicy([]) });
-  const denied = await unapproved.execute(command, "real-once-expired");
+  const denied = await unapproved.execute(command, "real-once-expired", "bash", { retryOnSandboxDenial: true });
   assert.equal(denied.disposition, "denied");
   assert.notEqual(denied.exitCode, 0);
 

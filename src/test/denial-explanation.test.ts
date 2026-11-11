@@ -98,7 +98,7 @@ test("reports reflect unavailable/covered resource retry, not merely a recogniza
 });
 
 async function execute(violations: readonly SandboxViolation[], options: {
-  observation?: SandboxObservationDiagnostic; throwSink?: boolean; policy?: "ask" | "deny";
+  observation?: SandboxObservationDiagnostic; throwSink?: boolean; policy?: "ask" | "deny"; retryOnSandboxDenial?: boolean;
 } = {}) {
   const events: string[] = [], applied: (readonly Capability[])[] = [];
   let sandboxCalls = 0, hostCalls = 0, approvals = 0;
@@ -118,9 +118,28 @@ async function execute(violations: readonly SandboxViolation[], options: {
     redactor: { redact: text => text.replaceAll("SECRET", "REDACTED") },
     approvals: { request: async () => { approvals++; events.push("approval"); return "deny"; } }
   });
-  const result = await executor.execute("gh repo view; tmux list-keys -T prefix P", "fixture");
+  const result = await executor.execute("gh repo view; tmux list-keys -T prefix P", "fixture", "bash", { retryOnSandboxDenial: options.retryOnSandboxDenial ?? true });
   return { result, events, applied, sandboxCalls, hostCalls, approvals };
 }
+
+test("unrequested retry still explains network denials without claiming scope preparation failed", async () => {
+  const report = sandboxDenialReport([endpoint], { ...context, candidates: [], retryNotRequested: true })!;
+  assert.equal(report.denials[0].sandboxRetry, "not-requested");
+  assert.match(report.denials[0].nextSteps.join(" "), /scope preparation and approval were not attempted/);
+  assert.doesNotMatch(report.denials[0].nextSteps.join(" "), /Check other blocked scopes\/deny rules/);
+  assert.match(report.nextSteps.join(" "), /original command result/);
+  for (const throwSink of [false, true]) {
+    const s = await execute([endpoint, ipc], { retryOnSandboxDenial: false, throwSink });
+    assert.match(s.events[0], /sandbox-denial-report/);
+    assert.equal(s.result.disposition, "sandbox");
+    assert.equal(s.result.retryNotRequested, true);
+    assert.equal(s.result.exitCode, 1);
+    assert.equal(s.approvals, 0);
+    assert.equal(s.sandboxCalls, 1);
+    assert.equal(s.hostCalls, 0);
+    assert.deepEqual(s.applied, [[]]);
+  }
+});
 
 test("agent report is redacted and emitted before approval even when headless/denied by policy", async () => {
   const withUi = await execute([ipc]);

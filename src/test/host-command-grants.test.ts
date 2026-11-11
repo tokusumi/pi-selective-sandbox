@@ -109,11 +109,11 @@ test("ordinary sandbox failure never replays on host even if approval would allo
   assert.equal(f.calls.host, 0);
 });
 
-test("a stored host grant replays exactly once only after a sandbox violation and without UI", async () => {
+test("an opted-in invocation with a stored host grant replays once after a sandbox violation without UI", async () => {
   const hosts = new SessionHostCommandGrantStore(); hosts.grant("A", command("/canonical/project"));
   const provider = createApprovalProvider({ hasUI: false, sessionManager: { getSessionId: () => "A" } }, new SessionGrantStore(), undefined, hosts);
   const f = executorFixture([{ kind: "filesystem.write", resource: "/observed/foo" }], () => result(1), request => provider.request(request));
-  assert.equal((await f.executor.execute("npm run build", "violation")).disposition, "host");
+  assert.equal((await f.executor.execute("npm run build", "violation", "bash", { retryOnSandboxDenial: true })).disposition, "host");
   assert.equal(f.calls.sandbox, 1); assert.equal(f.calls.host, 1);
 });
 

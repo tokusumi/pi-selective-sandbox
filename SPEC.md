@@ -128,21 +128,37 @@ For ordinary bash commands:
 3. If sandbox execution succeeds, return its result without approval.
 4. If it fails without a correlated sandbox violation, return that ordinary
    sandbox result without approval.
-5. If it has a violation, apply the capability policy and request approval when
-   policy permits asking.
-6. If any filesystem-write candidate intersects a configured deny root, do not
+5. If it has a violation but this invocation did not explicitly request
+   `retryOnSandboxDenial: true`, return the original result, observed violations,
+   and `retryNotRequested: true`. Do not prepare scopes or call the approval
+   provider (including stored host-grant lookup). Correlation is not causality
+   or retry intent. Observation and cleanup still run.
+6. Only with explicit retry intent, apply the capability policy and request
+   approval when policy permits asking. The intent flag never grants authority.
+7. If any filesystem-write candidate intersects a configured deny root, do not
    offer sandbox-capability approval: deny rules would make the retry
    ineffective. The approval surface may offer exact-command host replay only.
-7. A sandbox-capability response retries in the sandbox with the approved,
+8. A sandbox-capability response retries in the sandbox with the approved,
    canonical capability resource. If the retry exposes another blocked write,
    request a separate approval for the newly observed resource and retry with
    the accumulated grants. Stop when the command finishes, the failure has no
    new candidate, approval is denied, or the retry limit is reached.
-8. A host-command response replays the exact command on the host.
+9. A host-command response replays the exact command on the host.
+
+The replacement bash schema exposes optional boolean `retryOnSandboxDenial`,
+with a default of false. The library accepts it in the fourth argument to
+`execute(command, toolCallId, toolName, options)`; only literal true opts in.
+It is not remembered across invocations. This intentionally changes the old
+nonzero-plus-denial automatic approval behavior, including resource retry.
+Existing stored resource grants are still applied on the first attempt; existing
+host grants are matched in their original order only after retry was requested.
+No command-name, output-text or exit-code classifier is used; nonzero status is
+never rewritten to success. A later opted-in invocation executes in the sandbox
+again before considering that invocation's denials, and can repeat side effects.
 
 ### Resource approval interaction
 
-For supported write candidates, interactive TUI approval separates the observed
+For opted-in retries with supported write candidates, interactive TUI approval separates the observed
 blocked targets from the initial capability scopes (including prepared Git and
 directory-entry scopes), the selected write scopes, duration, and command.
 The initial selection is each prepared scope and `Once`. The user can choose
@@ -195,8 +211,15 @@ selection or host action. Both TUI and sequential bash confirmations must explai
 that directory descendants are covered for bash sandbox commands, while native
 write/edit require an exact target match.
 
-All attempts may remain visible in the streamed execution transcript. Before
-requesting approval for a detected violation, the extension streams
+All attempts may remain visible in the streamed execution transcript. Without
+retry intent, a nonzero result with observed denials still emits applicable
+communication-denial explanations, followed by
+`<sandbox: denial-observed retry-not-requested>`, and retains the original command
+exit/output. `details.selectiveSandbox` reports disposition, denialObserved and
+retryNotRequested as closed observation facts, not a causal diagnosis or grant.
+The standard structured exit code and nonzero error flag are preserved. Safe
+session records distinguish this as `retry / skipped / not-requested`.
+For opted-in retries, before requesting approval for a detected violation, the extension streams
 `<sandbox: approval-required filesystem.write>` (or the detected capability
 kind; for mixed denials the marker names the first kind, while the approval
 prompt discloses all observed targets). Approval then streams `<sandbox: approved widen retry>`,
@@ -247,6 +270,10 @@ and `pi-selective-sandbox:approval-audit-status:v1` coverage notices (`recording
 records through opaque `originId`/`callId` values. Event types and correlation
 fields are defined in `src/approval-diagnostics.ts`; projection and limits are
 in `src/session-audit.ts`. These records are not model messages or grants.
+Manifests advertising `retry-intent` support per-invocation retry requests.
+`retry / skipped / not-requested` means the provider was not called, not that
+approval was denied. Initial `grant.load` still runs. Process success/error does
+not classify CI state or establish that a denial caused the exit.
 
 Scope/project/tool-call identities use domain-separated HMACs with an ephemeral
 per-instance key. No raw commands, paths, hosts, tool inputs, outputs, denial
@@ -347,7 +374,10 @@ Bash emits `<sandbox-denial-report>` JSON before approval, including headless
 execution: communication category, observed operation/target, reason, candidate
 resource-retry route, and next steps. Unknown evidence remains unconfirmed;
 command/stderr never supplies missing targets. These diagnostics neither prove
-the cause of every command error nor authorize any retry. Socket creation/Mach
+the cause of every command error nor authorize any retry. Reports remain visible
+when retry was not requested, without preparing scopes or entering approval;
+`not-requested` distinguishes skipped preparation from an unavailable capability.
+Socket creation/Mach
 lookup observations remain diagnostic-only, not new host-replay triggers.
 Output is JSON/tag escaped, redacted, and bounded to eight records and 1,024
 characters per target, with explicit omission/truncation fields.
@@ -576,10 +606,13 @@ symlink and path escape. Compound shell expressions do not inherit helper trust.
   ```text
   try sandbox → success: done
               → ordinary failure: done
-              → violation + matching host grant: host replay
+              → violation, no retry intent: original result + observation
+              → violation + retry intent + matching host grant: host replay
   ```
 
-- Stored host grants never skip directly to host.
+- Stored host grants never skip directly to host or initiate a retry. No
+  approval provider or scope preparation runs without per-invocation retry
+  intent, even when a matching host grant exists.
 - Resource grants authorize sandbox widening only; host grants authorize exact
   host replay only.
 - Canonical resources and canonical cwd are used for reusable grant matching.

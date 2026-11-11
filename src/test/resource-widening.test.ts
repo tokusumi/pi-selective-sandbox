@@ -62,7 +62,7 @@ test("executor retries with the selected ancestor, never on the host", async () 
     policy: new CapabilityPolicy([]),
     approvals: { request: async () => ({ decision: "sandbox-allow-once", capabilities: [write("/outside")] }) }
   });
-  assert.equal((await executor.execute("touch output", "ancestor")).exitCode, 0);
+  assert.equal((await executor.execute("touch output", "ancestor", "bash", { retryOnSandboxDenial: true })).exitCode, 0);
   assert.deepEqual(attempts, [[], [write("/outside")]]);
 });
 
@@ -123,7 +123,7 @@ test("executor rejects unrelated or incomplete selected resources without rerunn
       runner: { runSandbox: async () => { runs++; return { exitCode: 1, stdout: "", stderr: "blocked" }; }, runHost: async () => { throw new Error("Unexpected host replay"); } },
       policy: new CapabilityPolicy([]), approvals: { request: async () => ({ decision: "sandbox-allow-once", capabilities }) }
     });
-    assert.equal((await executor.execute("touch output", "invalid-choice")).disposition, "denied");
+    assert.equal((await executor.execute("touch output", "invalid-choice", "bash", { retryOnSandboxDenial: true })).disposition, "denied");
     assert.equal(runs, 1);
   }
 });
@@ -136,7 +136,7 @@ test("a denial beneath an already approved ancestor does not ask for the same au
     policy: new CapabilityPolicy([]),
     approvals: { request: async () => { prompts++; return { decision: "sandbox-allow-once", capabilities: [write("/outside")] }; } }
   });
-  assert.equal((await executor.execute("touch output", "repeat-ancestor")).disposition, "sandbox");
+  assert.equal((await executor.execute("touch output", "repeat-ancestor", "bash", { retryOnSandboxDenial: true })).disposition, "sandbox");
   assert.equal(prompts, 1);
   assert.equal(runs, 2);
 });
@@ -405,7 +405,7 @@ test("a root selection does not turn a configured-deny violation into another re
       return seen.length === 1 ? { decision: "sandbox-allow-once", capabilities: [write("/")] } : "deny";
     } }
   });
-  assert.equal((await executor.execute("touch output", "root-deny")).disposition, "denied");
+  assert.equal((await executor.execute("touch output", "root-deny", "bash", { retryOnSandboxDenial: true })).disposition, "denied");
   assert.equal(attempts, 2);
   assert.deepEqual(seen, [[write("/outside/file")], []]);
 });

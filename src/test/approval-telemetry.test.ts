@@ -115,7 +115,7 @@ async function execution(diagnostics?: ApprovalDiagnostics, sequence: Capability
     runner: { runSandbox: async () => { order.push("run"); attempts++; return { exitCode: 1, stdout: secret, stderr: "" }; }, runHost: async () => { assert.fail("host fallback"); } },
     policy: new CapabilityPolicy([]), onStatus: marker => events.push(marker), approvals: { request: async r => { order.push("provider"); return { decision: "sandbox-allow-once", capabilities: r.capabilities }; } }
   });
-  const result = await executor.execute(secret, secret);
+  const result = await executor.execute(secret, secret, "bash", { retryOnSandboxDenial: true });
   return { result, order, events };
 }
 

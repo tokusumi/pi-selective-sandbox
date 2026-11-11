@@ -10,7 +10,7 @@ export type SandboxDenialExplanation = {
   operation: string;
   target: string | null;
   targetTruncated?: true;
-  sandboxRetry: "resource-approval" | "already-covered" | "unavailable";
+  sandboxRetry: "resource-approval" | "already-covered" | "unavailable" | "not-requested";
   explanation: string;
   nextSteps: string[];
 };
@@ -31,6 +31,8 @@ export type DenialExplanationContext = {
   granted: readonly Capability[];
   observation?: SandboxObservationDiagnostic;
   writeScopePreparationRejected?: boolean;
+  /** Scope preparation was deliberately skipped; this is not a capability failure. */
+  retryNotRequested?: boolean;
 };
 
 function operation(message: string | undefined): string {
@@ -56,7 +58,8 @@ export function sandboxDenialReport(violations: readonly SandboxViolation[], con
     let target = violation.resource === "unknown" ? null : violation.resource;
     const approvable = context.supportsNetworkWidening && context.candidates.some(capability => capability.kind === violation.kind && capability.resource === violation.resource);
     const covered = context.granted.some(capability => capability.kind === violation.kind && capability.resource === violation.resource);
-    const sandboxRetry = approvable ? "resource-approval" as const : covered ? "already-covered" as const : "unavailable" as const;
+    const sandboxRetry = context.retryNotRequested ? "not-requested" as const
+      : approvable ? "resource-approval" as const : covered ? "already-covered" as const : "unavailable" as const;
     const reason = networkDenialReason(violation);
     if (reason.startsWith("proxy-")) target = proxyTarget(violation.message) ?? target;
     if (reason === "unix-socket") return {
@@ -66,7 +69,8 @@ export function sandboxDenialReport(violations: readonly SandboxViolation[], con
     if (reason === "proxy-allowlist") {
       let explanation = "The proxy denied this exact endpoint because it is outside the allowlist.";
       const nextSteps = ["Review the exact endpoint; do not allow all external networking."];
-      if (approvable) nextSteps.push("An exact host:port resource approval can retry inside the sandbox; the entire command will run again.");
+      if (context.retryNotRequested) nextSteps.push("Retry was not requested; scope preparation and approval were not attempted. Inspect the command result before deciding whether repeating it to address denied access is appropriate.");
+      else if (approvable) nextSteps.push("An exact host:port resource approval can retry inside the sandbox; the entire command will run again.");
       else if (covered) nextSteps.push("The endpoint is already granted; inspect runtime/proxy enforcement rather than requesting the same authority again.");
       else if (!context.supportsNetworkWidening) {
         explanation += " This runtime does not support per-command network widening.";
@@ -114,7 +118,7 @@ export function sandboxDenialReport(violations: readonly SandboxViolation[], con
     version: 1, attempt: context.attempt,
     observation: denials.length ? "correlated-denial" : "unconfirmed", denials: bounded,
     omittedDenials: denials.length - bounded.length,
-    nextSteps: denials.length ? [] : [
+    nextSteps: denials.length ? (context.retryNotRequested ? ["Retry was not requested. The original command result is returned without scope preparation, approval, or replay."] : []) : [
       "Check any observation/monitor warning and obtain observer/proxy records correlated with this invocation before choosing a permission.",
       "If no sandbox denial can be established, diagnose the command's ordinary error instead of widening permissions."
     ],
