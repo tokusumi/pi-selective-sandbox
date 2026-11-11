@@ -13,6 +13,7 @@ const write: Capability = { kind: "filesystem.write", resource: "/repo/.git/work
 
 async function scenario(violations: readonly SandboxViolation[], options: {
   networkSupported?: boolean; writeScopeUnavailable?: boolean; answers?: string[]; response?: ApprovalResponse; stored?: readonly Capability[];
+  command?: string; stderr?: string; exitCode?: number;
 } = {}) {
   const titles: string[] = [], markers: string[] = [], sandboxCommands: string[] = [], hostCommands: string[] = [];
   const requests: EscalationApprovalRequest[] = [];
@@ -31,7 +32,7 @@ async function scenario(violations: readonly SandboxViolation[], options: {
       getViolationsForCommand: () => violations
     },
     runner: {
-      runSandbox: async text => { sandboxCommands.push(text); return { exitCode: sandboxCommands.length === 1 ? 1 : 0, stdout: "## task/issue\n", stderr }; },
+      runSandbox: async text => { sandboxCommands.push(text); return { exitCode: sandboxCommands.length === 1 ? (options.exitCode ?? 1) : 0, stdout: "## task/issue\n", stderr: options.stderr ?? stderr }; },
       runHost: async text => { hostCommands.push(text); return { exitCode: 0, stdout: "host fixture", stderr: "" }; }
     },
     canonicalizeCapabilities: async caps => options.writeScopeUnavailable ? undefined : caps,
@@ -45,7 +46,7 @@ async function scenario(violations: readonly SandboxViolation[], options: {
       return options.response ?? provider.request(request);
     } }
   });
-  const result = await executor.execute(command, "pr-view");
+  const result = await executor.execute(options.command ?? command, "pr-view");
   return { result, titles, markers, sandboxCommands, hostCommands, requests, applied };
 }
 
@@ -67,6 +68,8 @@ test("network socket denial with a TLS error shows the observed socket, not a wr
   assert.match(s.titles[0], /network: \/private\/var\/run\/example.sock/);
   assert.match(s.titles[0], /gh\(123\) deny\(1\) network-outbound/);
   assert.match(s.titles[0], /does not identify an approvable exact proxy host:port/);
+  assert.match(s.titles[0], /Local IPC \(Unix socket\), not external HTTP access/);
+  assert.match(s.titles[0], /tmux socket access[\s\S]*arbitrary host commands/);
   assert.match(s.titles[0], /do not establish the cause/);
   assert.match(s.titles[0], /entire command will run again/);
   assert.ok(s.titles[0].includes(command));
@@ -77,6 +80,42 @@ test("network socket denial with a TLS error shows the observed socket, not a wr
   assert.deepEqual(s.markers, ["<sandbox: approval-required network>", "<sandbox: approval-denied>"]);
   assert.deepEqual(s.sandboxCommands, [command]);
   assert.deepEqual(s.hostCommands, []);
+});
+
+test("tmux command success and absence are preserved without approval; IPC rejection never silently replays", async () => {
+  const tmuxCommand = "tmux list-keys -T prefix P";
+  for (const [exitCode, text] of [[0, ""], [127, "tmux: command not found"]] as const) {
+    const s = await scenario([], { command: tmuxCommand, exitCode, stderr: text });
+    assert.equal(s.result.exitCode, exitCode);
+    assert.equal(s.result.stderr, text);
+    assert.equal(s.result.disposition, "sandbox");
+    assert.deepEqual(s.requests, []);
+    assert.deepEqual(s.sandboxCommands, [tmuxCommand]);
+    assert.deepEqual(s.hostCommands, []);
+  }
+  const socket = "/fixture/tmux/default";
+  const s = await scenario([network(socket, `tmux(123) deny(1) network-outbound ${socket}`)], {
+    command: tmuxCommand, stderr: `error connecting to ${socket} (Operation not permitted)`
+  });
+  assert.match(s.titles[0], /Local IPC/);
+  assert.deepEqual(s.requests[0].capabilities, []);
+  assert.equal(s.result.disposition, "denied");
+  assert.deepEqual(s.sandboxCommands, [tmuxCommand]);
+  assert.deepEqual(s.hostCommands, []);
+  assert.deepEqual(s.applied, [[]]);
+});
+
+test("tmux command or stderr alone never identifies an observed denial target", async () => {
+  const options = { command: "gh repo view; tmux list-keys -T prefix P", stderr: "error connecting to /fixture/tmux/default (Operation not permitted)" };
+  const noObserver = await scenario([], options);
+  assert.deepEqual(noObserver.requests, []);
+  const unknown = await scenario([network("unknown")], options);
+  assert.match(unknown.titles[0], /Denial target\/type is unknown/);
+  assert.doesNotMatch(unknown.titles[0], /Local IPC \(Unix socket\)/);
+  assert.deepEqual(unknown.hostCommands, []);
+  const pathOnly = await scenario([network("/fixture/tmux/default")], options);
+  assert.match(pathOnly.titles[0], /Denial target\/type is unknown/);
+  assert.doesNotMatch(pathOnly.titles[0], /Local IPC \(Unix socket\)/);
 });
 
 test("unsupported network runtime and read denials give capability-specific reasons", async () => {
@@ -125,6 +164,7 @@ test("an exact proxy endpoint offers sandbox-only retry and reruns the full comp
   assert.deepEqual(s.requests[0].capabilities, [target]);
   assert.deepEqual(s.requests[0].wideningUnavailableReasons, []);
   assert.match(s.titles[0], /network: api.github.com:443/);
+  assert.doesNotMatch(s.titles.join("\n"), /Local IPC|tmux socket access/);
   assert.doesNotMatch(s.titles.join("\n"), /write scope|deny root/i);
   assert.deepEqual(s.sandboxCommands, [command, command]);
   assert.deepEqual(s.hostCommands, []);

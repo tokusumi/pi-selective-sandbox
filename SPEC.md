@@ -204,7 +204,7 @@ prompt discloses all observed targets). Approval then streams `<sandbox: approve
 attempt ends with `<sandbox: retry exit=N>` or `<sandbox: replay exit=N>`.
 The `approval-required` marker precedes provider lookup and is **not a UI count**.
 A stored grant can return without a selector, and a single request can invoke
-multiple selectors. Default [session approval history](docs/approval-diagnostics.md)
+multiple selectors. Default [session approval history](README.md#approval-history-recorded-by-default)
 uses non-model-facing CustomEntry records to separate provider calls, lookup
 outcomes, selector dispatch/invocation/render, responses, persistence, retry
 correlation, closed network-denial categories and attempt/final exit results.
@@ -218,9 +218,10 @@ does not prove pixel visibility or that a denial caused a command failure.
 Diagnostic failure must not change decisions or execution order.
 Only the final selected attempt determines the tool exit code; denial retains
 the latest sandbox exit code. Ordinary failures and sandbox successes have no
-status marker. On macOS, missing correlated denials alone must not change a failed
-command's output. Observation details (including command keys, monitor snapshots,
-and counters) are diagnostic-only and available on process stderr through
+status marker. On macOS, missing correlated denials must not imply a permission
+failure or trigger approval; an `unconfirmed` report may explain that uncertainty.
+Observation details (including command keys, monitor snapshots, and counters)
+are diagnostic-only and available on process stderr through
 `NODE_DEBUG=pi-selective-sandbox`, after configured redaction. A known unavailable
 or interrupted monitor instead adds a short `<sandbox: observation-unavailable>`
 warning; it never infers a permission, offers approval, disables enforcement, or
@@ -237,6 +238,37 @@ and a limit of 16 sandbox approvals. Resource approval does not classify
 destructive intent: commands such as `git clean -fd` can change files entirely
 inside writable roots without prompting. Trusted pure Skill helpers
 are the explicitly limited exception described in section 13.
+
+### Approval audit storage
+
+Session JSONL uses `pi-selective-sandbox:approval-audit:v1` CustomEntry records
+and `pi-selective-sandbox:approval-audit-status:v1` coverage notices (`recording`,
+`truncated`, `write-error`). Tool-result `details.selectiveSandboxAudit` links
+records through opaque `originId`/`callId` values. Event types and correlation
+fields are defined in `src/approval-diagnostics.ts`; projection and limits are
+in `src/session-audit.ts`. These records are not model messages or grants.
+
+Scope/project/tool-call identities use domain-separated HMACs with an ephemeral
+per-instance key. No raw commands, paths, hosts, tool inputs, outputs, denial
+messages, UI choices, credentials, or exception text are recorded. Equality is
+meaningful only within the same instance, not across reloads or processes.
+Session payload limits are 4 MiB / 8,192 events per instance, 32 KiB per event,
+and 128 entries per scope/observed/network array. Status notices are separate.
+Storage follows Pi session retention; opt-out, crashes and loss cannot be
+reconstructed. Review exports for timing and equality information.
+
+The independent opt-in file sink writes UUID JSONL files beneath
+`<Pi agent directory>/pi-selective-sandbox/approvals/diagnostics/`, using 0700
+directories and exclusive 0600 files. It rejects unsafe directories/symlinks,
+caps each instance at 4 MiB and 256 queued events, and never changes permissions
+to recover a diagnostic failure. Cleanup during writes removes matching files
+older than seven days at most once daily; it does not run while stopped.
+
+`scripts/summarize-approval-diagnostics.mjs` reads explicitly supplied session
+or private files and deduplicates emitter/sequence pairs. Selector dispatch,
+API invocation and custom rendering are distinct events, not additive UI counts.
+Inspect `sessionFilesWithoutAudit`, `sessionTruncated`, `sessionWriteErrors`, and
+`sessionStatusGaps`; missing records are unknown, not evidence of no approvals.
 
 ## 6. write/edit flow
 
@@ -308,6 +340,17 @@ SDK resolved-address guards remain enforced on proxy traffic: a hostname approva
 not bypass DNS-rebinding/private-address protection. The proxies preserve SDK
 upstream proxy resolution (explicit SDK configuration, otherwise HTTP_PROXY /
 HTTPS_PROXY and NO_PROXY), with the destination allowlist checked before routing.
+
+### Model-visible communication denial reports
+
+Bash emits `<sandbox-denial-report>` JSON before approval, including headless
+execution: communication category, observed operation/target, reason, candidate
+resource-retry route, and next steps. Unknown evidence remains unconfirmed;
+command/stderr never supplies missing targets. These diagnostics neither prove
+the cause of every command error nor authorize any retry. Socket creation/Mach
+lookup observations remain diagnostic-only, not new host-replay triggers.
+Output is JSON/tag escaped, redacted, and bounded to eight records and 1,024
+characters per target, with explicit omission/truncation fields.
 
 ### System certificate verification (macOS)
 
