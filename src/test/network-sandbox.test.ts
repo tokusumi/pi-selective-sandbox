@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { AnthropicSandboxRuntime } from "../runtime-adapter.js";
+import { AnthropicSandboxRuntime, withNetworkRestrictions } from "../runtime-adapter.js";
 import { SelectiveSandboxExecutor } from "../executor.js";
 import { CapabilityPolicy } from "../policy.js";
 import { createApprovalProvider } from "../pi-extension.js";
@@ -138,4 +138,47 @@ test("macOS strict local policy retains filesystem isolation during endpoint wid
   assert.equal(await readFile(file, "utf8"), "unchanged");
   const direct = await stored.execute(`/usr/bin/curl --noproxy '*' -fsS --max-time 3 http://127.0.0.1:${port}/`, "real-direct-denied");
   assert.notEqual(direct.exitCode, 0);
+});
+
+test("macOS temporary IP and Unix-socket access stay independent and preserve filesystem denies", { skip: process.platform !== "darwin" }, async t => {
+  // Short path avoids macOS sockaddr_un length limits. No external service is contacted.
+  const base = await realpath(await mkdtemp("/tmp/pi-switch-"));
+  const socketPath = join(base, "server.sock"), blocked = join(base, "blocked");
+  await writeFile(blocked, "unchanged");
+  const tcp = http.createServer((_req, res) => res.end("tcp-ok"));
+  const unix = http.createServer((_req, res) => res.end("unix-ok"));
+  let runtime: AnthropicSandboxRuntime | undefined;
+  t.after(async () => {
+    await runtime?.dispose();
+    await Promise.all([tcp, unix].map(server => new Promise<void>(resolve => server.close(() => resolve()))));
+    await rm(base, { recursive: true, force: true });
+  });
+  await new Promise<void>((resolve, reject) => { tcp.once("error", reject); tcp.listen(0, "127.0.0.1", resolve); });
+  await new Promise<void>((resolve, reject) => { unix.once("error", reject); unix.listen(socketPath, resolve); });
+  const port = (tcp.address() as { port: number }).port;
+  runtime = await AnthropicSandboxRuntime.initialize({ cwd: base, writePolicy: { allow: [base], deny: [blocked] }, allowedDomains: [], allowLocalBinding: false });
+  let sequence = 0;
+  for (const [network, socket] of [[true, true], [false, true], [true, false], [false, false], [true, true]] as const) {
+    const operation = withNetworkRestrictions(runtime, { network, socket });
+    const run = async (command: string) => {
+      const commandId = `switch-os-${sequence++}`;
+      try {
+        const wrapped = await operation.wrap(command, { commandId, commandText: command });
+        try { return { ...await exec("/bin/bash", ["-c", wrapped], { cwd: base, timeout: 10000 }), exitCode: 0 }; }
+        catch (error) {
+          const failed = error as Error & { code: number; stdout: string; stderr: string };
+          if (typeof failed.code !== "number") throw error;
+          return { exitCode: failed.code, stdout: failed.stdout, stderr: failed.stderr };
+        }
+      } finally { await operation.forgetCommand?.(commandId); }
+    };
+    const ip = await run(`/usr/bin/curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:${port}/`);
+    assert.equal(ip.exitCode === 0, !network, JSON.stringify({ network, socket, ip }));
+    if (!network) assert.equal(ip.stdout, "tcp-ok");
+    const ipc = await run(`/usr/bin/curl --noproxy '*' --unix-socket '${socketPath}' -fsS --max-time 2 http://localhost/`);
+    assert.equal(ipc.exitCode === 0, !socket, JSON.stringify({ network, socket, ipc }));
+    if (!socket) assert.equal(ipc.stdout, "unix-ok");
+    assert.notEqual((await run(`printf changed > '${blocked}'`)).exitCode, 0);
+    assert.equal(await readFile(blocked, "utf8"), "unchanged");
+  }
 });

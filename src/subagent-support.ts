@@ -8,8 +8,9 @@ import { parseConfig, type ConfigLoadResult } from "./config.js";
 import { canonicalPath, expandPath } from "./filesystem-policy.js";
 import { SUBAGENT_BINDING_EVENT, startApprovalBridge, validBridgeBinding, type ApprovalBridgeBinding } from "./subagent-approval.js";
 import type { EscalationUI } from "./widening-dialog.js";
+import { DEFAULT_SANDBOX_SWITCHES, publishSandboxSwitches, readSandboxSwitches, type SandboxSwitches } from "./session-switches.js";
 
-export type ChildSandboxBinding = { version: 1; bridge: ApprovalBridgeBinding; config: ConfigLoadResult; protectedRoot: string };
+export type ChildSandboxBinding = { version: 2; bridge: ApprovalBridgeBinding; config: ConfigLoadResult; protectedRoot: string };
 export type RequiredChildApi = {
   registerRequiredChildExtensions(input: { sessionId: string; extensions: { id: string; path: string }[] }): { dispose(): void };
 };
@@ -34,7 +35,7 @@ export async function loadRequiredChildApi(): Promise<RequiredChildApi | undefin
 export function validChildSandboxBinding(value: unknown): value is ChildSandboxBinding {
   if (typeof value !== "object" || value === null) return false;
   const binding = value as ChildSandboxBinding;
-  if (binding.version !== 1 || !validBridgeBinding(binding.bridge) || typeof binding.protectedRoot !== "string") return false;
+  if (binding.version !== 2 || !validBridgeBinding(binding.bridge) || typeof binding.protectedRoot !== "string") return false;
   if (!isAbsolute(binding.protectedRoot) || /[\x00-\x1f\x7f-\x9f]/.test(binding.protectedRoot) || !binding.bridge.directory.startsWith(binding.protectedRoot + "/")) return false;
   if (binding.config?.valid === false) return true;
   try { return binding.config?.valid === true && JSON.stringify(parseConfig(binding.config.config)) === JSON.stringify(binding.config.config); }
@@ -48,6 +49,7 @@ export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: st
   let registration: { dispose(): void } | undefined;
   let unavailable = false;
   let bindingFailed = false;
+  let closed = false;
   const unsubscribe = pi.events?.on(SUBAGENT_BINDING_EVENT, value => {
     const request = value as { version?: number; binding?: ChildSandboxBinding; accepted?: boolean } | undefined;
     if (request?.version !== 1 || !validChildSandboxBinding(request.binding) || childBinding) {
@@ -61,8 +63,17 @@ export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: st
     get binding() { return childBinding; },
     get bindingFailed() { return bindingFailed; },
     get unavailable() { return unavailable; },
-    async start(context: EscalationUI & { cwd: string }, config: ConfigLoadResult, protectedRoot: string) {
-      if (childBinding || unavailable || !context.hasUI || !context.ui) return;
+    async readSwitches(): Promise<SandboxSwitches | undefined> {
+      if (bindingFailed || closed) throw new Error("Sandbox switch binding is closed or invalid; execution is blocked.");
+      const binding = childBinding?.bridge ?? bridge?.binding;
+      return binding ? readSandboxSwitches(binding) : undefined;
+    },
+    async publishSwitches(switches: SandboxSwitches): Promise<void> {
+      if (childBinding || bindingFailed || closed) throw new Error("Sandbox switches must be changed from the owning parent session.");
+      if (bridge) await publishSandboxSwitches(bridge.binding, switches);
+    },
+    async start(context: EscalationUI & { cwd: string }, config: ConfigLoadResult, protectedRoot: string, switches: SandboxSwitches = DEFAULT_SANDBOX_SWITCHES) {
+      if (closed || childBinding || unavailable || !context.hasUI || !context.ui) return;
       try {
         const sessionId = context.sessionManager?.getSessionId();
         if (!sessionId) throw new Error("Sandbox subagent support requires a parent session ID");
@@ -85,7 +96,8 @@ export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: st
         const inherited: ConfigLoadResult = config.valid ? { valid: true, config: {
           ...config.config, filesystem: { ...config.config.filesystem, extraWritableRoots: await Promise.all(config.config.filesystem.extraWritableRoots.map(path => canonicalPath(expandPath(path, context.cwd)))) }
         } } : { valid: false };
-        const binding: ChildSandboxBinding = { version: 1, bridge: bridge.binding, config: inherited, protectedRoot };
+        await publishSandboxSwitches(bridge.binding, switches);
+        const binding: ChildSandboxBinding = { version: 2, bridge: bridge.binding, config: inherited, protectedRoot };
         const companion = join(bridge.binding.directory, "child-parent.mjs");
         // Claim at load time when the sandbox factory is already loaded. If
         // loader ordering puts the companion first, its session_start handler
@@ -111,6 +123,7 @@ export function createSubagentSupport(pi: ExtensionAPI, options: { entryPath: st
       }
     },
     async close() {
+      closed = true;
       registration?.dispose();
       registration = undefined;
       parentSessionId = undefined;

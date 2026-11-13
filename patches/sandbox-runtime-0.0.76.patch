@@ -8,7 +8,48 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
  import * as path from 'path';
  import { logForDebugging } from '../utils/debug.js';
  import { whichSync } from '../utils/which.js';
-@@ -1031,78 +1032,118 @@
+@@ -591,7 +592,7 @@
+ /**
+  * Generate complete sandbox profile
+  */
+-function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
++function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowAllNetwork = false, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
+     const profile = [
+         '(version 1)',
+         `(deny default (with message "${logTag}"))`,
+@@ -789,10 +790,12 @@
+         // "localhost:*") matches connect() to 127.0.0.1 and ::1 but not
+         // ::ffff:127.0.0.1; runtimes that connect to loopback via dual-stack
+         // sockets need to use AF_INET (see JAVA_TOOL_OPTIONS injection below).
+-        if (allowLocalBinding) {
++        if (allowAllNetwork || allowLocalBinding) {
+             profile.push('(allow network-bind (local ip "*:*"))');
+             profile.push('(allow network-inbound (local ip "*:*"))');
+-            profile.push('(allow network-outbound (remote ip "localhost:*"))');
++            profile.push(allowAllNetwork
++                ? '(allow network-outbound (remote ip "*:*"))'
++                : '(allow network-outbound (remote ip "localhost:*"))');
+         }
+         // Unix domain sockets for local IPC (SSH agent, Docker, Gradle, etc.)
+         // Three separate operations must be allowed:
+@@ -884,7 +887,7 @@
+  * Wrap command with macOS sandbox
+  */
+ export function wrapCommandWithSandboxMacOS(params) {
+-    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
++    const { command, commandId, needsNetworkRestriction, allowAllNetwork, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, javaAgentJarPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
+     // SBPL cannot redirect a read to different bytes, so whole-file masking
+     // degrades to read-deny on macOS: the sandboxed process gets EPERM
+     // instead of the sentinel. The DYLD interposer (a later step) lifts
+@@ -929,6 +932,7 @@
+         httpProxyPort,
+         socksProxyPort,
+         needsNetworkRestriction,
++        allowAllNetwork,
+         allowUnixSockets,
+         allowAllUnixSockets,
+         allowLocalBinding,
+@@ -1031,78 +1035,118 @@
   * Start monitoring macOS system logs for sandbox violations
   * Look for sandbox-related kernel deny events ending in {logTag}
   */
@@ -189,7 +230,16 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandb
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.d.ts
-@@ -58,11 +58,30 @@
+@@ -12,6 +12,8 @@
+      */
+     commandId?: string;
+     needsNetworkRestriction: boolean;
++    /** Allow all IP traffic without opening Unix sockets or Mach services. */
++    allowAllNetwork?: boolean;
+     httpProxyPort?: number;
+     socksProxyPort?: number;
+     /** Per-session proxy auth token; embedded in proxy env URLs. */
+@@ -58,11 +60,30 @@
  export declare function macGetMandatoryDenyPatterns(allowGitConfig?: boolean): string[];
  export interface SandboxViolationEvent {
      line: string;
@@ -235,36 +285,66 @@ diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-vio
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.js
-@@ -1296,9 +1296,9 @@
+@@ -1280,7 +1280,8 @@
+     // Even with empty allowedDomains, we route through proxy so that:
+     // 1. updateConfig() can enable network access for already-running processes
+     // 2. The proxy blocks all requests when allowlist is empty
+-    const needsNetworkProxy = hasNetworkConfig;
++    const allowAllNetwork = platform === 'macos' && options?.allowAllNetwork === true;
++    const needsNetworkProxy = hasNetworkConfig && !allowAllNetwork;
+     // Wait for network initialization only if proxy is actually needed
+     if (needsNetworkProxy) {
+         await waitForNetworkInitialization();
+@@ -1295,11 +1296,12 @@
+                 command,
                  commandId,
                  needsNetworkRestriction,
++                allowAllNetwork,
                  // Only pass proxy ports if proxy is running (when there are domains to filter)
 -                httpProxyPort: needsNetworkProxy ? getProxyPort() : undefined,
 -                socksProxyPort: needsNetworkProxy ? getSocksProxyPort() : undefined,
 -                proxyAuthToken: needsNetworkProxy ? proxyAuthToken : undefined,
+-                caCertPath: mitmCA?.trustBundlePath,
 +                httpProxyPort: needsNetworkProxy ? (options?.networkProxy?.port ?? getProxyPort()) : undefined,
 +                socksProxyPort: needsNetworkProxy ? (options?.networkProxy?.port ?? getSocksProxyPort()) : undefined,
 +                proxyAuthToken: needsNetworkProxy ? (options?.networkProxy?.token ?? proxyAuthToken) : undefined,
-                 caCertPath: mitmCA?.trustBundlePath,
++                caCertPath: needsNetworkProxy ? mitmCA?.trustBundlePath : undefined,
                  javaAgentJarPath: needsNetworkProxy ? javaAgentJarPath : undefined,
                  readConfig,
-@@ -1309,7 +1309,7 @@
+                 writeConfig,
+@@ -1307,9 +1309,9 @@
+                 setEnvVars: credentialRestrictions.setEnvVars,
+                 maskedFileBinds: credentialRestrictions.maskedFileBinds,
                  allowUnixSockets: getAllowUnixSockets(),
-                 allowAllUnixSockets: getAllowAllUnixSockets(),
+-                allowAllUnixSockets: getAllowAllUnixSockets(),
 -                allowLocalBinding: getAllowLocalBinding(),
-+                allowLocalBinding: customConfig?.network?.allowLocalBinding ?? getAllowLocalBinding(),
 -                allowMachLookup: getAllowMachLookup(),
++                allowAllUnixSockets: options?.allowAllUnixSockets ?? getAllowAllUnixSockets(),
++                allowLocalBinding: customConfig?.network?.allowLocalBinding ?? getAllowLocalBinding(),
 +                allowMachLookup: customConfig?.network?.allowMachLookup ?? getAllowMachLookup(),
                  ignoreViolations: getIgnoreViolations(),
                  allowPty,
                  allowGitConfig: getAllowGitConfig(),
+@@ -1346,7 +1348,7 @@
+                 maskedFileBinds: credentialRestrictions.maskedFileBinds,
+                 maskedFileStoreDir: credentialRestrictions.maskedFileStoreDir,
+                 enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
+-                allowAllUnixSockets: getAllowAllUnixSockets(),
++                allowAllUnixSockets: options?.allowAllUnixSockets ?? getAllowAllUnixSockets(),
+                 binShell,
+                 ripgrepConfig: getRipgrepConfig(),
+                 mandatoryDenySearchDepth: getMandatoryDenySearchDepth(),
 diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
 --- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
 +++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/sandbox-manager.d.ts
-@@ -25,6 +25,8 @@
+@@ -25,6 +25,12 @@
   * `customConfig`).
   */
  export type WrapWithSandboxOptions = {
++    /** Embedder-only per-invocation IP access; macOS keeps Unix/Mach policy separate. */
++    allowAllNetwork?: boolean;
++    /** Explicit per-invocation Unix-socket policy, including false after a permissive sibling. */
++    allowAllUnixSockets?: boolean;
 +    /** Embedder-owned per-invocation proxy. macOS only; Seatbelt allows only its port. */
 +    networkProxy?: { port: number; token: string };
      /**

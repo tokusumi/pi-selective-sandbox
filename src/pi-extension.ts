@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
 import { createSkillAuthority } from "./skill-authority.js";
-import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
+import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError, withNetworkRestrictions } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_CONFIG, DEFAULT_WRITE_PROFILES, loadConfig, type ConfigLoadResult } from "./config.js";
 import { resolveNetworkDomains } from "./network-policy.js";
@@ -29,6 +29,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentityInfo } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
+import type { SandboxSwitches } from "./session-switches.js";
 import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, ExecutionResult, SkillAuthority } from "./types.js";
 
 const debug = debuglog("pi-selective-sandbox");
@@ -147,30 +148,68 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi, diagnostics });
   const commandNamespace = randomUUID();
   let enabled = true;
+  const restrictions = { network: true, socket: true };
   let monitorDisabled = false;
+  let monitorWarningShown = false;
+  let switchUpdates = Promise.resolve();
   const monitorDisabledMessage = "Selective sandbox is disabled for bash, write, and edit because macOS SDK log monitoring is disabled (enableLogMonitor=false). Bash runs on the host; native mutation approvals are bypassed. Enable SDK log monitoring and reload to restore enforcement.";
   const warnMonitorDisabled = (context?: unknown) => {
     const ctx = context as { hasUI?: boolean; ui?: { notify(message: string, level: "warning"): void } } | undefined;
     if (ctx?.hasUI && ctx.ui) ctx.ui.notify(monitorDisabledMessage, "warning");
     else console.warn("WARNING: " + monitorDisabledMessage);
   };
+  const changeSwitch = (field: keyof SandboxSwitches, value: boolean, context: unknown): Promise<boolean> => {
+    const update = switchUpdates.then(async () => {
+      await ensureSetup(context);
+      if (field === "enabled" && value) {
+        if (process.platform === "darwin") await ensureRuntime();
+        if (monitorDisabled) { warnMonitorDisabled(context); return false; }
+      }
+      const next = { enabled, ...restrictions, [field]: value };
+      // Publish first; failed publication must not acknowledge a partial local change.
+      await subagents.publishSwitches(next);
+      enabled = next.enabled;
+      restrictions.network = next.network;
+      restrictions.socket = next.socket;
+      return true;
+    });
+    switchUpdates = update.then(() => {}, () => {});
+    return update;
+  };
   pi.registerCommand("selective-sandbox", {
-    description: "Enable or disable sandbox enforcement: /selective-sandbox on|off",
+    description: "Toggle sandbox restrictions: /selective-sandbox [network|socket] on|off (off temporarily allows access)",
+    getArgumentCompletions(prefix) {
+      const values = ["on", "off", "network on", "network off", "socket on", "socket off"];
+      const matches = values.filter(value => value.startsWith(prefix)).map(value => ({ value, label: value }));
+      return matches.length ? matches : null;
+    },
     async handler(args, context) {
-      const mode = args.trim();
-      if (mode !== "on" && mode !== "off") {
-        context.ui.notify("Usage: /selective-sandbox on|off", "info");
+      const parsed = /^(?:(network|socket)\s+)?(on|off)$/.exec(args.trim());
+      if (!parsed) {
+        context.ui.notify("Usage: /selective-sandbox on|off; /selective-sandbox network on|off; /selective-sandbox socket on|off", "info");
         return;
       }
-      if (mode === "on" && monitorDisabled) {
-        warnMonitorDisabled(context);
+      const [, target, mode] = parsed;
+      if (subagents.binding) {
+        context.ui.notify("Sandbox switches are controlled by the owning parent session. Run /selective-sandbox there; this child was not changed.", "warning");
         return;
       }
-      enabled = mode === "on";
-      if (enabled && !await isEnabled(context)) return;
+      if (!await changeSwitch(target === "network" || target === "socket" ? target : "enabled", mode === "on", context)) return;
+      if (target === "network" || target === "socket") {
+        const scope = target === "network" ? "External IP network" : "Unix socket";
+        const platformNote = target === "network" && process.platform !== "darwin"
+          ? " Network isolation is supported only on macOS; this does not add Linux network isolation."
+          : target === "socket" && process.platform === "linux"
+            ? " Ubuntu's baseline leaves Unix sockets unrestricted." : "";
+        context.ui.notify(mode === "off"
+          ? `${scope} restrictions disabled for subsequent bash operations in this session and its native subagents; access is allowed. Filesystem restrictions are unchanged. Use /selective-sandbox ${target} on to restore the baseline.${platformNote}`
+          : `${scope} restrictions restored to the platform baseline for subsequent bash operations in this session and its native subagents.${platformNote}${enabled ? "" : " Sandbox enforcement is still off; use /selective-sandbox on to enable it."}`,
+          mode === "off" ? "warning" : "info");
+        return;
+      }
       context.ui.notify(enabled
-        ? "Selective sandbox enabled for bash, write, and edit."
-        : "Selective sandbox disabled for bash, write, and edit. Use /selective-sandbox on to enable it again.", enabled ? "info" : "warning");
+        ? "Selective sandbox enabled for bash, write, and edit in this session and its native subagents."
+        : "Selective sandbox disabled for bash, write, and edit in this session and its native subagents. Use /selective-sandbox on to enable it again.", enabled ? "info" : "warning");
     }
   });
   const grants = new SessionGrantStore();
@@ -216,7 +255,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   pi.on("session_start", async (_event, context) => {
     sessionAudit?.start();
     await ensureSetup(context);
-    await subagents.start(context, loadedConfig, protectedRoot);
+    await subagents.start(context, loadedConfig, protectedRoot, { enabled, ...restrictions });
+    await subagents.readSwitches();
   });
   pi.on("tool_call", event => {
     const safeActions = new Set(["list", "status", "guide", "models", "cost", "doctor", "stop", "interrupt", "steer", "debug.run"]);
@@ -246,16 +286,20 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
       if (process.platform === "darwin" && error instanceof SandboxInitializationFailure) monitorDisabled = error.logMonitorEnabled === false;
     }
   };
-  const isEnabled = async (context?: unknown) => {
+  const operationSwitches = async (context?: unknown): Promise<SandboxSwitches> => {
     await ensureSetup(context);
-    if (!enabled) return false;
-    if (process.platform === "darwin") await ensureRuntime();
-    if (monitorDisabled && enabled) {
-      enabled = false;
-      warnMonitorDisabled(context);
-    }
-    return enabled;
+    return await subagents.readSwitches() ?? { enabled, ...restrictions };
   };
+  const enabledForOperation = async (switches: SandboxSwitches, context?: unknown) => {
+    if (!switches.enabled) return false;
+    if (process.platform === "darwin") await ensureRuntime();
+    if (monitorDisabled) {
+      if (!monitorWarningShown) { warnMonitorDisabled(context); monitorWarningShown = true; }
+      return false; // SDK fallback is local, never published to children or siblings.
+    }
+    return true;
+  };
+  const isEnabled = async (context?: unknown) => enabledForOperation(await operationSwitches(context), context);
   pi.on("session_shutdown", async () => {
     sessionAudit?.close(); // Late selector callbacks must not enter a replacement session.
     try { await subagents.close(); } finally { await runtime?.dispose(); void diagnosticFile?.close(); }
@@ -277,8 +321,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     ],
     async execute(id, params, signal, onUpdate, context) {
       const retryOnSandboxDenial = params.retryOnSandboxDenial === true;
-      await ensureSetup(context);
-      if (!await isEnabled(context)) {
+      const operationRestrictions = await operationSwitches(context);
+      if (!await enabledForOperation(operationRestrictions, context)) {
         const hostBash = createBashTool(cwd, { operations: { exec: (command, commandCwd, opts) => runCommand(localOperations, command, commandCwd, opts) } });
         return redactToolResult(await hostBash.execute(id, params, signal, onUpdate));
       }
@@ -294,7 +338,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               runHost: raw => runCommand(localOperations, raw, commandCwd, options)
             };
             const executor = new SelectiveSandboxExecutor({
-              runtime,
+              runtime: runtime && withNetworkRestrictions(runtime, operationRestrictions),
               cwd: commandCwd,
               sandboxUnavailableMessage: sandboxUnavailableMessage ?? sandboxInitializationError,
               runner,

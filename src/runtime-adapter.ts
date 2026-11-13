@@ -10,6 +10,21 @@ import type { SandboxObservationDiagnostic, SandboxRuntime, SandboxViolation, Un
 import { DEFAULT_ALLOWED_DOMAINS, canonicalNetworkEndpoint, networkResourceFromLine } from "./network-policy.js";
 import { createCommandNetworkProxy, closeCommandNetworkProxies, type CommandNetworkProxy } from "./network-proxy.js";
 
+export type NetworkRestrictions = { network: boolean; socket: boolean };
+
+/** Freeze the session switches for a bash operation, including all its retries. */
+export function withNetworkRestrictions(runtime: AnthropicSandboxRuntime, restrictions: NetworkRestrictions): SandboxRuntime {
+  const snapshot = { network: restrictions.network, socket: restrictions.socket };
+  return {
+    supportsNetworkWidening: runtime.supportsNetworkWidening && snapshot.network,
+    wrap: (command, context) => runtime.wrap(command, context, snapshot),
+    getViolationsForCommand: id => runtime.getViolationsForCommand(id),
+    getObservationDiagnostic: id => runtime.getObservationDiagnostic?.(id),
+    traceSinkForCommand: id => runtime.traceSinkForCommand?.(id),
+    forgetCommand: id => runtime.forgetCommand?.(id)
+  };
+}
+
 export type SandboxSettings = { cwd: string; writePolicy: WritePolicy; allowRead?: readonly string[]; allowedDomains?: readonly string[]; commandNamespace?: string; allowLocalBinding?: boolean };
 
 // Exact OS services for certificate verification, native process listing and
@@ -168,7 +183,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
     return instance;
   }
 
-  async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }): Promise<string> {
+  async wrap(command: string, context: { commandId: string; commandText: string; cwd?: string; extraCapabilities?: readonly import("./types.js").Capability[] }, restrictions: NetworkRestrictions = { network: true, socket: true }): Promise<string> {
     if (this.disposed) throw new Error("Sandbox runtime has been disposed");
     if (process.platform === "darwin") this.monitorAtStart.set(context.commandId, monitorStatus());
     const extraWrites = context.extraCapabilities?.filter(capability => capability.kind === "filesystem.write").map(capability => capability.resource) ?? [];
@@ -181,7 +196,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
       return endpoint;
     });
     let proxy: CommandNetworkProxy | undefined;
-    if (this.supportsNetworkWidening) {
+    if (this.supportsNetworkWidening && restrictions.network) {
       if (this.proxies.has(context.commandId)) throw new Error("Duplicate active sandbox command ID");
       proxy = await createCommandNetworkProxy(this.commandKey(context.commandId), [...(this.settings.allowedDomains ?? DEFAULT_ALLOWED_DOMAINS), ...endpoints], sharedRuntime().manager);
       this.proxies.set(context.commandId, proxy);
@@ -204,7 +219,10 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
           allowLocalBinding: this.settings.allowLocalBinding ?? true,
           allowMachLookup: [...MACOS_BASELINE_MACH_SERVICES]
         } } : {})
-      }, undefined, { ...context, commandId: this.commandKey(context.commandId), ...(proxy ? { networkProxy: proxy } : {}) });
+      }, undefined, { ...context, commandId: this.commandKey(context.commandId),
+        allowAllNetwork: process.platform === "darwin" && !restrictions.network,
+        allowAllUnixSockets: this.useStrace || !restrictions.socket,
+        ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {
       await this.forgetCommand(context.commandId);
       throw error;

@@ -22,9 +22,53 @@ explicitly disables enforcement for all three tools until extensions are reloade
 with Pi's `/reload` command, Pi restarts, or the user runs `/selective-sandbox on`.
 While disabled, bash executes directly on the host with output
 redaction, and native write/edit skip boundary checks and approvals. This mode
-is not a grant and is not persisted. Missing or unsupported arguments display
+is not a grant and is not saved in configuration/grant stores. Temporary switch
+state is published to the owning parent's private session transport for its native
+children, then removed on normal shutdown/reload. Missing or unsupported arguments display
 usage without changing the mode. The sandbox-first and fail-closed contracts
 below apply while enforcement is enabled.
+
+The user may independently run `/selective-sandbox network off|on` and
+`/selective-sandbox socket off|on`. Here `off` temporarily disables the named
+restriction, **not** communication. Both restrictions start on; component `on`
+restores the platform baseline rather than denying all communication. Missing,
+extra or unsupported arguments show usage without changing any switch. Argument
+completion includes both component forms and the global on/off forms.
+
+- macOS `network off` allows all IP bind/inbound/outbound traffic (TCP/UDP,
+  DNS, private/LAN destinations and all-interface listeners), without the
+  extension's proxy/allowlist. It does not emit unrestricted `network*` rules,
+  open Unix sockets, or broaden Mach lookup. Inherited user proxy settings are
+  preserved; sandbox proxy credentials, Git proxy overrides and the Java proxy
+  agent are not injected. Network endpoint widening is unavailable for that
+  operation because endpoint grants no longer constrain IP access.
+- `socket off` permits all Unix-domain sockets, independently of IP filtering
+  and exact Mach-service permissions. Filesystem rules still apply to direct
+  file access, including creation of socket directory entries. Existing host
+  services/relays are trusted boundaries and may confer filesystem, credential,
+  network or host-execution authority beyond those direct rules.
+- Linux network isolation is still unsupported; `network on` adds no isolation.
+  Ubuntu's Unix sockets remain unrestricted even with `socket on`. Other Linux
+  restores its existing Unix-socket isolation when the switch is on.
+- All three switches follow the owning parent across new, running, retained and
+  nested local native children. Parent updates are serialized and atomically
+  published before acknowledging success. Bound child commands do not modify
+  local or shared state; they direct the user to the owning parent. Other root
+  sessions remain independent. Switches are not configuration or grants.
+  Parent reload/restart/session replacement resets them to on and invalidates
+  old child bindings; child-only reload inherits current parent state. The global
+  off switch overrides both component settings; global on preserves them, and
+  component on cannot reenable global enforcement.
+- Each bash execution snapshots all three switches after setup and before execution;
+  all its attempts/retries use that snapshot. Already-running commands and
+  background descendants are not revoked by later toggles. No process-wide SDK
+  configuration mutation is used: every wrap explicitly supplies the effective
+  Unix-socket boolean (including the Ubuntu baseline), and macOS IP override.
+  Concurrent siblings cannot inherit another operation's temporary override.
+- Both component switches preserve direct filesystem enforcement, native
+  write/edit approvals, redaction and sandbox-unavailable fail-closed behavior.
+  They never grant exact-command host replay. Existing explicit trusted-helper
+  exceptions remain unchanged.
 
 On macOS only, an explicitly `false` SDK initialization flag
 `enableLogMonitor` forces enforcement off for all three tools before an enabled
@@ -32,7 +76,9 @@ tool executes. A warning must state that bash will run on the host and native
 mutation approvals will be bypassed. `/selective-sandbox on` cannot override
 this condition; the SDK flag must be restored and the extension reloaded. This
 condition is the flag value only: initialization errors or monitor-process
-failures do not by themselves trigger automatic off.
+failures do not by themselves trigger automatic off. This runtime-local SDK
+fallback is separate from explicit user switches and never publishes off to the
+parent, children or siblings.
 
 - `bash` is a subprocess execution surface. Normal commands are wrapped by the
   OS sandbox runtime before the command runner starts them.
@@ -874,7 +920,39 @@ binding preference and macOS per-invocation endpoint isolation are inherited.
 The local binding preference is applied on each macOS invocation, so a shared
 SDK's startup setting cannot reopen access for a strict child. Linux's existing
 unsupported network contract is unchanged. Enforcement starts enabled independently in each
-child. The parent's in-memory off switch and session grants are not copied.
+child. Session grants are not copied. Explicit global/network/socket switches
+instead follow the owning parent's live session record as described below.
+
+### Live command-switch propagation
+
+The version-2 child binding references its owning parent's existing bridge
+identity. Before registering required extensions the parent writes a versioned
+`switches.json` record containing that parent session ID/nonce and three strict
+booleans (`enabled`, `network`, `socket`). Every parent/bound-child bash/write/edit
+operation rereads and validates the current record exactly once before choosing
+an execution path. Bash retries retain that complete operation snapshot, even
+across approvals and subsequent parent commands. No SDK-wide config mutation or
+notification watcher is used; process boundaries do not change this behavior.
+
+Readers reuse the bounded, owner-checked, single-link, `O_NOFOLLOW` transport
+reader and verify the canonical directory, alive identity and record identity.
+Missing, corrupt, unsupported, mismatched or closed state throws before any host
+execution or native file access; it never returns false, cached off, or default
+on as a fallback. Initial publication failure blocks child admission. Failed
+command publication does not commit local state or announce success. Writes use
+0600 temporary files and atomic rename; the parent serializes concurrent command
+updates. Only the owning parent publishes; bound-child commands cannot alter
+siblings or their parent.
+
+Normal parent shutdown/reload removes the record and invalidates old bindings,
+which require relaunch. Version-1 bindings are rejected rather than silently
+retaining old non-propagating semantics; upgrade/reload the parent and relaunch
+its children. The alive marker is not a heartbeat and does not guarantee immediate
+crash detection. These files are local trusted-extension coordination, not an
+OS boundary against same-UID host commands (including commands run while global
+enforcement is off). Existing runtime-local monitor-disabled behavior is not
+published as a user switch. Configuration snapshots and grant ownership remain
+unchanged.
 
 Only selector requests are forwarded to the exact registered parent. The parent
 UI displays child session ID/cwd and uses sequential built-in selectors. Resource
