@@ -591,11 +591,52 @@ from accessing credentials it is otherwise authorized to use.
 
 ## 13. Trusted Skill helpers
 
-Skill trust comes from the Skill authority supplied by `@spences10/pi-skills`;
-path naming alone does not establish trust. Only a pure, single helper
-invocation can receive special trusted execution treatment. Its helper path
-must resolve under the active Skill's declared canonical helper root, preventing
-symlink and path escape. Compound shell expressions do not inherit helper trust.
+Trusted helper execution is an explicit exception to sandbox-first execution:
+when the runtime is available, a matching helper runs directly on the host,
+with no denial or per-invocation approval required. Its arguments are not
+operation-restricted; granting a skill trusts its helper code and dependencies.
+This authority is independent of stored host-command grants and their cwd
+matching, and never creates a filesystem capability grant.
+
+The default trust set is empty. The user-local sandbox configuration may specify
+`skills.trustedSkillPaths`, an array of exact absolute or `~/` paths to
+`SKILL.md`, not names, discovery roots or patterns. Project configuration cannot
+supply this authority. Existing implicit project-helper trust is not migrated.
+A configured path grants authority only when Pi's actual loaded skill command
+has `source=skill`, `sourceInfo.scope=user`, and the same canonical skill-file
+identity. Pi's loader therefore owns root discovery and same-name collision
+selection, including user `.agents/skills`; the sandbox does not rescan roots
+to invent loaded skills. Missing provenance/paths and invalid sandbox config
+produce no trusted helper authority.
+
+`@spences10/pi-skills` supplies profile enablement, not host trust.
+`get_enabled_skill_paths()` is an additional-resource discovery contribution,
+not an allowlist. For canonical manager matches, every matching entry must be
+enabled and pass enablement evaluation using its original manager path. The
+manager's global/project label does not override Pi's actual user provenance:
+ancestor scanning can classify user `.agents` entries as project. For unknown
+paths, use native profile evaluation only when no discovered entry has the
+same name; otherwise refuse the API's by-name fallback. Evaluate unknown paths
+against loaded, canonical and configured aliases, so switching aliases does
+not bypass a configured-path exclusion. No name match transfers trust or
+permits an unloaded collision loser or project/temporary command.
+
+Configuration and canonical allowlist identities are pinned at extension setup;
+changing that list requires reload. Enablement is reread for each invocation.
+Retargeting a configured symlink cannot authorize a new identity without reload.
+The canonical skill file's parent is the skill root, including for file-only
+symlinks. Only a pure, single literal helper invocation qualifies: direct paths,
+`bash`, `sh`, `python`, `python3`, `node`, or `uv run`, with literal arguments.
+Relative helper paths use the command cwd, not the host process cwd, and
+preserve symlink/`..` components until filesystem canonicalization. An unquoted
+`~/` helper prefix uses HOME; a quoted tilde is literal. Assignment-shaped
+leading words and option-shaped helper operands do not qualify: interpreter
+options cannot stand in for a script. Bare PATH command names, shell
+operators/expansions, escapes, comments, malformed quotes and newlines do not
+qualify. The helper must resolve to a regular file strictly beneath the
+canonical skill's `scripts/` root, itself strictly beneath that skill root.
+Directory aliases are allowed; symlink/path escapes are not. Authority lookup
+failures fall back to ordinary sandbox execution, not automatic host execution.
 
 ## 14. Security invariants
 

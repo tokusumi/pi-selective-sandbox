@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url";
 import { debuglog } from "node:util";
 import { isBroadGitParent, requestEscalationApproval, type ApprovalProject } from "./escalation-approval.js";
 import { displayText, type EscalationUI } from "./widening-dialog.js";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createBashTool, createLocalBashOperations, getAgentDir, type BashOperations, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { redact_text } from "@spences10/pi-redact";
-import { create_skills_manager } from "@spences10/pi-skills";
+import { createSkillAuthority } from "./skill-authority.js";
 import { AnthropicSandboxRuntime, SandboxInitializationFailure, sandboxInitializationError } from "./runtime-adapter.js";
 import { MutationBoundary } from "./filesystem-boundary.js";
 import { DEFAULT_CONFIG, DEFAULT_WRITE_PROFILES, loadConfig, type ConfigLoadResult } from "./config.js";
@@ -56,22 +56,6 @@ export function redactToolResult<T extends { content: readonly { type: string; t
   return { ...result, ...redactedStructured, content: result.content.map(item =>
     item.type === "text" && typeof item.text === "string" ? { ...item, text: redact_text(item.text).redacted } : item
   ) } as T;
-}
-
-function skills(cwd: string): SkillAuthority {
-  const manager = create_skills_manager({ cwd });
-  return {
-    async getActiveSkills() {
-      const enabled = new Set(manager.get_enabled_skill_paths());
-      return manager.discover().filter(skill => skill.enabled && enabled.has(skill.skillPath)).map(skill => ({
-        id: skill.key,
-        root: dirname(skill.skillPath),
-        helperRoots: ["scripts"],
-        active: true,
-        trusted: true
-      }));
-    }
-  };
 }
 
 /** Shared stored-grant lookup; bash widening has its own scope/duration UI. */
@@ -195,6 +179,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   let loadedConfig: ConfigLoadResult = { valid: true, config: DEFAULT_CONFIG };
   let writePolicy: WritePolicy = { allow: [], deny: [] };
   let gitWritePaths: GitWritePaths | undefined;
+  let skillAuthority: SkillAuthority | undefined;
   let setup: Promise<void> | undefined;
   const ensureSetup = async (context?: unknown) => {
     if (subagents.bindingFailed) throw new Error("Child sandbox binding failed; execution is blocked.");
@@ -202,6 +187,11 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
       const ctx = context as { cwd?: string } | undefined;
       cwd = ctx?.cwd ?? process.cwd();
       loadedConfig = subagents.binding?.config ?? await loadConfig(join(getAgentDir(), "pi-selective-sandbox", "config.json"));
+      skillAuthority = await createSkillAuthority({
+        cwd,
+        trustedSkillPaths: loadedConfig.valid ? loadedConfig.config.skills?.trustedSkillPaths ?? [] : [],
+        getCommands: () => pi.getCommands?.() ?? []
+      });
       protectedRoot = await canonicalPath(subagents.binding?.protectedRoot ?? join(getAgentDir(), "pi-selective-sandbox", "approvals"));
       const resolved = await resolveWritePolicy({ cwd, config: loadedConfig.valid ? loadedConfig.config : {
         filesystem: { extraWritableRoots: [], disabledDefaultProfiles: [...DEFAULT_WRITE_PROFILES] }
@@ -312,7 +302,7 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
               approvals: createApprovalProvider(approvalContext({ ...context, signal: options.signal }), grants, project, hostGrants, gitWritePaths, diagnostics),
               diagnostics,
               diagnosticActor: subagents.binding ? "child" : "parent",
-              skills: skills(commandCwd),
+              skills: skillAuthority,
               trustedHelpersAutoApprove: true,
               getSandboxCapabilities: async trace => {
                 const sessionId = context.sessionManager?.getSessionId();

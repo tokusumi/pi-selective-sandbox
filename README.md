@@ -112,6 +112,59 @@ For `write` and `edit`, a canonical target inside configured writable roots exec
 
 Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash`, `write`, and `edit`. Subsequent bash commands run directly on the host, and native file mutations skip boundary approvals. Bash output redaction remains active. Run `/selective-sandbox on` to enable enforcement again. The setting stays in memory and is not saved to configuration or grants; Pi's `/reload` command (which reloads extensions) or restarting Pi also restores enforcement. Missing or unsupported arguments display usage and leave enforcement unchanged.
 
+### Explicit user-skill helper trust
+
+To allow one user-managed skill's helpers across projects, add its exact
+`SKILL.md` path to `<Pi agent directory>/pi-selective-sandbox/config.json`:
+
+```json
+{
+  "skills": {
+    "trustedSkillPaths": ["~/.agents/skills/worktree-finish/SKILL.md"]
+  }
+}
+```
+
+Merge this field with any existing filesystem/network configuration, then
+`/reload`. **This authorizes direct host execution, outside the sandbox, of
+that skill's `scripts/` helpers with arbitrary literal arguments.** Review the
+skill and its helpers before granting it; this is not a read-only permission.
+It does not authorize every skill, every shell script, or compound commands.
+For example:
+
+```sh
+~/.agents/skills/worktree-finish/scripts/finish-worktree.sh --message "変更内容"
+```
+
+The skill must also be actually loaded by Pi with **user** provenance and
+remain enabled under the current `pi-skills` profile. This setting does not
+load or enable skills. Use Pi's global skill settings if your Pi version does
+not discover that user root automatically. Project/temporary resources and
+same-name skills that Pi did not load cannot inherit this permission.
+`get_enabled_skill_paths()` contributes extra discovery paths; it is not a
+host-permission list. Discovery and `/skills enable` alone never grant trust.
+Previously implicit project-helper trust is not migrated; those commands now
+follow the ordinary sandbox/approval path.
+
+Paths must be absolute or start with `~/`, end in `SKILL.md`, and contain no
+patterns. Canonical skill identities are pinned at setup; directory symlink
+aliases work, but retargeting one cannot authorize a new skill until reload.
+Helpers must resolve to files beneath the canonical skill's `scripts/` tree;
+links escaping that tree are not trusted. A symlink to `SKILL.md` alone does
+not grant trust to scripts adjacent to the link. Literal direct invocations,
+`bash`/`sh`/`python`/`python3`/`node` and `uv run` are supported. Relative helper
+paths use the command cwd; bare PATH command names, shell expansions (except
+an unquoted `~/` helper path), newlines, pipelines and shell compounds receive
+no special permission.
+
+Changes to `trustedSkillPaths` require `/reload`; completed profile changes
+are checked on each invocation. For a manager-discovered skill, its exact
+entry/key controls enablement (an ancestor `.agents` entry may be labelled
+project by `pi-skills`, even when Pi loads it as user). An unknown user path
+with a same-name manager entry is conservatively not auto-approved, avoiding
+the manager's by-name enablement fallback. Missing paths/provenance, invalid
+sandbox configuration or failed discovery grant no helper authority.
+
 ### Network permission (macOS)
 
 System certificate verification works by default, including `gh` and Go HTTPS

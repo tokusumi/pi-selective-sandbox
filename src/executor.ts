@@ -29,7 +29,7 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       return output;
     };
     if (!runtime) return complete(this.unavailable());
-    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills)) return complete(this.finish(await runner.runHost(command), "host", []));
+    if (skills && this.options.trustedHelpersAutoApprove && await findTrustedHelper(command, skills, this.options.cwd)) return complete(this.finish(await runner.runHost(command), "host", []));
     const granted = [...(await this.options.getSandboxCapabilities?.(initialTrace) ?? [])]
       .filter(capability => capability.kind !== "network" || runtime.supportsNetworkWidening);
     let commandId = toolCallId;
