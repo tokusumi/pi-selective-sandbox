@@ -110,7 +110,43 @@ Approval is tied to filesystem access, not whether a Git command is destructive.
 
 For `write` and `edit`, a canonical target inside configured writable roots executes normally. A target outside those roots must receive a sandbox-capability approval before any file-content read, directory creation, or mutation. Native write/edit never offer host-command approval.
 
-Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash`, `write`, and `edit`. Subsequent bash commands run directly on the host, and native file mutations skip boundary approvals. Bash output redaction remains active. Run `/selective-sandbox on` to enable enforcement again. The setting stays in memory and is not saved to configuration or grants; Pi's `/reload` command (which reloads extensions) or restarting Pi also restores enforcement. Missing or unsupported arguments display usage and leave enforcement unchanged.
+Run `/selective-sandbox off` to explicitly disable sandbox enforcement for `bash`, `write`, and `edit`. Subsequent bash commands run directly on the host, and native file mutations skip boundary approvals. Bash output redaction remains active. Run `/selective-sandbox on` to enable enforcement again. The setting is session-only (not configuration or grants) and propagates to native subagents at their next tool operation. Reloading or restarting the owning parent restores enforcement; its old child bindings become invalid and those children must be relaunched. Missing or unsupported arguments display usage and leave enforcement unchanged.
+
+### Temporary network / Unix-socket access
+
+Toggle these restrictions independently without disabling filesystem enforcement:
+
+| Command | Effect on subsequent bash operations |
+| --- | --- |
+| `/selective-sandbox network off` | Allow unrestricted IP traffic on macOS, bypassing the destination allowlist and sandbox proxy |
+| `/selective-sandbox network on` | Restore the configured network baseline and eligible endpoint grants |
+| `/selective-sandbox socket off` | Allow all Unix-domain sockets |
+| `/selective-sandbox socket on` | Restore the platform's Unix-socket baseline |
+
+Here **off disables the restriction**, not communication. Both switches start
+on in the owning parent and reset when that parent reloads, replaces its session
+or restarts. All three switches propagate to its new and existing native
+subagents, including nested/retained children, at the next `bash`/`write`/`edit`
+operation. Change switches in the owning parent; bound children cannot override
+them. Temporary state is shared through the protected parent-session transport,
+not configuration or approvals. Each bash operation, including its retries,
+keeps the snapshot it started with; existing processes are not revoked or changed. The global `/selective-sandbox off` overrides both switches;
+global `on` preserves their individual settings. Component `on` does not enable
+global enforcement when it is off.
+
+Network-off allows direct TCP/UDP, DNS, private/LAN destinations and listeners
+on any interface; it adds no arbitrary Mach-service permission. Inherited user
+proxy settings are preserved, but the extension does not inject its filtering
+proxy. Socket-off leaves IP filtering and exact Mach allowances unchanged,
+but host services such as Docker/SSH agents can relay traffic, expose secrets
+or perform privileged filesystem operations. These services are trusted host
+boundaries: direct filesystem deny rules do not contain their effects.
+
+Network isolation remains macOS-only; `network on` cannot add Linux isolation.
+On Ubuntu, Unix sockets are already unrestricted, so `socket on` restores that
+same baseline, **not** socket isolation. Ordinary sandbox initialization failures
+still fail closed; neither component switch authorizes host replay or bypasses
+native write/edit approvals.
 
 ### Explicit user-skill helper trust
 
@@ -259,7 +295,17 @@ Private bridge files and generated child bindings live under
 `<Pi agent directory>/pi-selective-sandbox/approvals/`. While enforcement is on,
 this root is denied to bash/write/edit even after widening `/`. Child shutdown
 releases only its own runtime; it does not reset a sibling's shared SDK monitor.
-`/selective-sandbox off` remains local to the session where it was invoked.
+All three `/selective-sandbox` switches follow the owning parent. A missing,
+invalid or closed parent switch binding blocks all three tools, even if the last
+state was off; it never reuses stale authority or falls back to host execution.
+Parent updates are serialized and acknowledged only after atomic publication.
+The temporary record is removed on normal shutdown/reload. The existing alive
+file is not a heartbeat: immediate crash detection is not guaranteed. Reloading
+only a bound child rereads the current parent state, not independent defaults.
+Bindings now require version 2; reload the parent and relaunch old children after
+upgrading. SDK-monitor-disabled fallback remains local to the affected runtime
+and is not published to other sessions. Owner-only transport files are not a
+security boundary against same-user host commands when global enforcement is off.
 
 ### Filesystem and network configuration
 
@@ -483,8 +529,8 @@ The SDK is pinned to `0.0.76`. `npm ci` applies
 `patches/sandbox-runtime-0.0.76.patch` through the `postinstall` script, using
 Git and checking exact SDK file hashes before and after application. Do not
 skip lifecycle scripts. The patch fixes record attribution, preserves raw resources, and lets the
-macOS wrapper use an embedder-owned per-invocation proxy port/token and Mach
-service policy, including when the shared SDK was initialized by another session. It retains
+macOS wrapper use an embedder-owned per-invocation proxy port/token, independent
+IP/Unix-socket switches and exact Mach service policy, including when the shared SDK was initialized by another session. It retains
 the SDK's log-stream/store execution path and sanitized presentation text. Unexpected versions or partial/local modifications
 fail installation rather than silently accepting an incomplete patch. An SDK
 upgrade requires reviewing the patch and rerunning the regression tests.

@@ -42,6 +42,9 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   try { await file.writeFile(text); } finally { await file.close(); }
   try { await rename(temporary, path); } finally { await removeFile(temporary); }
 }
+// Shared by the owner-written switch record; retain identical safe transport I/O.
+export { readJson as readBridgeJson, writeJson as writeBridgeJson };
+
 async function removeFile(path: string): Promise<void> {
   try { await unlink(path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
 }

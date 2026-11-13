@@ -287,7 +287,7 @@ test("on/off toggles all tool boundaries, retains redaction, and resets on reloa
   const command = commands.get("selective-sandbox")!;
   for (const args of ["", "invalid", "off extra"]) {
     await command.handler(args, context);
-    assert.equal(notices.at(-1), "Usage: /selective-sandbox on|off");
+    assert.match(notices.at(-1)!, /^Usage:.*network on\|off.*socket on\|off/);
     await assert.rejects(execute("write", { path: target, content: "before" }), /Permission denied/);
   }
   await assert.rejects(readFile(target));

@@ -12,19 +12,19 @@ const patch = join(root, "patches", "sandbox-runtime-0.0.76.patch");
 const files = {
   "sandbox-manager.js": [
     "9eef40ef0700f36a57fa55f253dd48cb2fccadbe8ac4caca5aac47a2e4c686a5",
-    "441754bf9680c015fff5a9c6934e4d9cc57763ef6691395f8b8c3422557cdecb"
+    "29addddb5720520499053201bf23204ebdeba59e97385629a970b3f8414623c4"
   ],
   "sandbox-manager.d.ts": [
     "c118b0fc98694cee5f33d8136c177153d28f8436c96c349a5a5e00c1129237fa",
-    "d15eca99eaf26157f8759a3d1604b086819688e25fe5e3ae2479c80d199b0289"
+    "adad2e0f649ff50462e6b85c9698318832ca7a9a05893a26f4f7b4818311610c"
   ],
   "macos-sandbox-utils.js": [
     "5e7672b216ac850e28c9ea90688d705a068ad6f8d1f2ece7e8399c7db92319dd",
-    "bf4e8a085f90587f4b71bc5e7ba899190422b1fdb4edf53742e41539d2d411d5"
+    "614837e5896fefe4271e0e902189b3ab818682304bd538eddd38b789fe411d39"
   ],
   "macos-sandbox-utils.d.ts": [
     "2b4727a648b59bbe41d6ac0dc492b9b7adc39d6e7dc05c10285cc9670d6244ac",
-    "93f353f08422dc360925fc79d7906bdb0bb9884676470428122052bbc3cfbb35"
+    "bb5612d25d268f087bc1375c28d2d60f0120c94ac46faaa05545454becffba92"
   ],
   "sandbox-violation-store.js": [
     "e7524fb72e0d483ebc572bb3e37d1baf472db59714c3f3935824e9d3b82b2142",
