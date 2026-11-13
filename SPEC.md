@@ -90,7 +90,7 @@ There are two deliberately separate authorities:
 | Grant | Authority | Permitted execution |
 | --- | --- | --- |
 | `SandboxCapabilityGrant` | capability and canonical resource | widened sandbox only |
-| `HostCommandGrant` | exact `CommandIdentity` | host replay only |
+| `HostCommandGrant` | exact command + execution mode + explicit cwd scope (§8) | host replay only |
 
 `SandboxCapabilityGrant` never authorizes host execution.
 
@@ -193,9 +193,18 @@ write denial already beneath an applied grant does not request the same
 ineffective widening again. Storage identity matching remains exact.
 
 Host replay is a separate `Run outside sandbox…` action with its own duration
-and final exact-command confirmation, displaying command, canonical cwd and
-execution mode when available. It never turns a resource choice into host
-authority. Unsupported violations and configured-deny intersections offer no
+and final exact-command confirmation, displaying command, canonical execution cwd,
+execution mode and cwd scope when available. New Git Project confirmations state
+that only the same canonical worktree-relative cwd in main/linked worktrees
+(including future sessions) is covered. The relative coordinate is displayed;
+other relative directories and descendants are not approved. Execution stays in
+the caller's cwd, not the project base. They
+warn that relative paths, local scripts, configuration and repository content can
+change effects or execute different code across worktrees. Exact-cwd confirmations
+(including Session and Git-unverified Project approvals) explicitly retain exact
+canonical cwd; the latter explain that cwd sharing is unavailable. This shared
+host confirmation is used by TUI, sequential/RPC and bridged child approval.
+It never turns a resource choice into host authority. Unsupported violations and configured-deny intersections offer no
 resource selection, but can offer that separate host confirmation. The host-only
 prompt lists all observed capability kinds, targets, and available denial messages.
 The executor supplies diagnostic-only reasons distinguishing unsupported network
@@ -450,15 +459,73 @@ configuration disables local binding as well as clearing the proxy allowlist.
 Conceptual identity:
 
 ```text
-exact command + canonical cwd + execution mode
+exact shell command + execution mode + explicit cwd scope
 ```
 
-Reusable host grants are partitioned by session ID for session scope and project
-identity for project scope. Host grants are persisted separately from sandbox
-capability grants and contain only command identities. There are no
-command-prefix matches,
-executable-name-only matches, environment-wide hashes, or resource-scoped host
-grants.
+- Once: only the current operation, never stored.
+- Session: exact canonical cwd, partitioned by Pi session ID; unchanged.
+- Project, `exact-cwd`: exact canonical cwd, partitioned by project identity.
+  All historical v1 grants and new approvals without verified Git membership
+  retain this scope.
+- Project, `git-worktree-relative`: exact canonical Git project identity **plus
+  exact canonical worktree-relative cwd**, instead of exact absolute cwd. Resolve
+  command cwd and the current worktree's root with realpath, then derive their
+  relative path (`.` for the root). The root comes from Git's `rev-parse
+  --path-format=absolute --show-toplevel`, not the shared Git metadata directory
+  or its parent. Startup must have successfully discovered the Git project;
+  lookup and save freshly verify that project and the relative coordinate.
+  `worktree-A/src` matches `worktree-B/src`, not either worktree's `tests`, root,
+  or `src/child`. Root approval does not approve all subdirectories.
+
+Missing, failed or mismatched project/worktree discovery never uses cwd fallback
+as Git proof or guesses a relative coordinate. Bare repositories' linked
+worktrees use their own roots normally. A bare directory itself or an independent
+metadata directory has no worktree root: Project approvals there remain exact-cwd,
+without mapping the metadata directory to a linked worktree's root.
+
+The execution cwd always stays the caller's cwd; grant matching does not rewrite
+it to the project base. Different repos, separate clones, nested independent repos,
+Git-outside directories, different relative cwds and discovery failures cannot
+reuse `git-worktree-relative` grants. Symlink aliases are canonicalized before
+deriving the coordinate; a retargeted alias does not carry authority to another
+project or a different relative directory. Resource grants retain exact capability/resource identities.
+
+Host grants are persisted separately from sandbox capability grants. There are no
+command-prefix matches, executable-name-only matches, environment-wide hashes,
+argument wildcards, general bash/sh permissions or resource-scoped host grants.
+The exact string includes all arguments. Approving the same string is not a
+script-content hash: relative commands/paths, scripts, configuration, environment
+and repository content can differ by cwd/worktree and change host effects. Project
+approval deliberately trusts those effects at the same relative cwd across
+worktrees, not at unrelated relative directories. It is not a containment boundary on resources the approved
+command itself accesses. Once or Session remains available for narrower trust.
+
+### Host-store compatibility
+
+The host store reads v1 entries only as `exact-cwd`, ignoring any added scope
+fields. V2 `exact-cwd` entries retain their exact absolute cwd. The earlier v2
+`git-project` scope (which omitted cwd constraints) is rejected, including at its
+original cwd: it requires fresh approval, not automatic conversion or inference
+from historical cwd. Unknown versions/scopes never grant authority.
+
+Writes use version 3 with entries containing `shellCommand`, approval-time `cwd`,
+`executionMode`, and required `cwdScope: "exact-cwd" | "git-worktree-relative"`.
+Relative entries additionally require `relativeCwd`: a nonempty normalized
+worktree-relative path, with `.` representing root. Absolute paths, parent escapes,
+unnormalized spellings and missing coordinates are rejected. For relative entries,
+stored absolute cwd is provenance; the project and relativeCwd remain match
+constraints. Enumeration includes scope and coordinate to avoid ambiguity. The
+existing `grant` API remains exact-cwd; `grantGitProject` requires the expressly
+confirmed relativeCwd and verifies it again before saving.
+
+V3 writes preserve v1 and v2 exact-cwd authority, never automatically expanding
+it to other worktrees. Reuse at a corresponding relative cwd requires a new
+explicit Project confirmation after a miss in another worktree, or revocation
+and reapproval. Worktree-keyed project IDs are not remapped. Session/Once and
+the resource-store format do not change. V1/v2 readers reject the v3 envelope;
+however, an old writer may treat v3 as empty and overwrite it with an older
+format, losing approvals. Update/reload all writers before saving approvals;
+mixed-version writes are not supported.
 
 ## 9. CommandIdentity
 
@@ -471,13 +538,17 @@ execution mode
 ```
 
 The shell command must match exactly. The working directory must be
-canonicalized. If cwd cannot be canonicalized, reusable host session/project
-approval is unavailable; a one-time host replay may still be offered after a
-violation.
+canonicalized and describes actual execution, even when the Project grant's cwd
+scope matches by Git identity plus canonical worktree-relative cwd (§8). If cwd cannot be canonicalized, reusable host
+session/project approval is unavailable; a one-time host replay may still be
+offered after a violation.
 
 ## 10. Project identity
 
-Project identity is resolved once at extension startup:
+Project identity and its Git-versus-cwd-fallback provenance are resolved once at
+extension startup. Read-only Git discovery ignores inherited `GIT_*` environment
+overrides so it describes cwd rather than an environment-selected repository;
+this does not change the command execution environment:
 
 1. canonical Git base directory, when Git can provide one (the first entry from
    `git worktree list --porcelain -z`); normally this is the main worktree
@@ -489,10 +560,11 @@ Project identity is resolved once at extension startup:
 If neither path can be canonicalized, project persistence is unavailable.
 Project identity is distinct from the extension startup working directory used as
 the default writable root. Changing directories later does not change the
-identity. Project grants are shared across the main and linked worktrees, but
-capability resources and host command cwd remain exact canonical paths; sharing
-project identity does not make a host command approved in one cwd eligible in
-another. Moving or cloning a repository does not inherit its project grants.
+identity. Project grants are shared across main and linked worktrees, but
+capability resources remain exact canonical paths. Host cwd matching depends on
+the explicitly approved cwd scope (§8): new verified Git Project authority is
+shared, historical exact-cwd authority is not. Moving or cloning a repository
+does not inherit its project grants.
 Previously stored grants keyed to an individual linked worktree are not migrated
 to the base identity; approve them again for the shared project if needed.
 
@@ -506,20 +578,29 @@ persistent additions/replacements without restart or explicit `load()`. The
 `load()` method remains compatible but does not retain authorization state.
 No mtime/size cache or file watcher is used.
 
-- Resource identities remain exact project + capability kind + resource; host
-  identities remain exact project + command + canonical cwd + execution mode.
-  The files and authority types stay separate. Once and Session approvals remain
+- Resource identities remain exact project + capability kind + resource. Host
+  identities remain exact project + command + execution mode + cwd scope, where
+  `exact-cwd` also requires canonical absolute cwd equality and
+  `git-worktree-relative` requires freshly verified Git membership, startup Git
+  provenance and exact canonical relative-cwd equality. The files and
+  authority types stay separate. Once and Session approvals remain
   operation-local and session-local, respectively; they are not shared via disk.
 - A completed deletion or removal of an entry is reflected in the next lookup.
   Missing files, read failures, invalid JSON, unsupported versions and invalid
   top-level structures yield no project grants for that lookup, never the last
   successful snapshot. As before, invalid individual entries are filtered out;
-  valid entries in an otherwise valid version-1 store remain usable. Subsequent
-  valid files are recognized automatically, including after a transient failure.
+  valid entries in a supported store remain usable (resource v1; host v1/v2/v3 with
+  the compatibility rules in §8). Subsequent valid files are recognized
+  automatically, including after a transient failure.
 - Each lookup is a snapshot, not an authorization transaction. An already-started
   sandbox invocation (including its retries) retains its operation's capability
   snapshot, and an already-authorized mutation or host replay is not cancelled
   retroactively. Revocation applies at subsequent lookup/operation boundaries.
+  Git membership checks are also snapshots, not transactional protection against
+  repository/symlink changes between validation and execution. Git-project host
+  saves revalidate both membership and the confirmed relative cwd after
+  confirmation, denying a failure or changed coordinate without silently
+  downgrading the confirmed scope.
 - Each grant write rereads the file, merges into that snapshot, and atomically
   renames a private, uniquely named temporary file over the store. Sequential
   additions from multiple processes are preserved. **Overlapping read/merge/write
@@ -615,7 +696,10 @@ symlink and path escape. Compound shell expressions do not inherit helper trust.
   intent, even when a matching host grant exists.
 - Resource grants authorize sandbox widening only; host grants authorize exact
   host replay only.
-- Canonical resources and canonical cwd are used for reusable grant matching.
+- Canonical resources and canonical cwd are used for reusable grant matching;
+  explicitly approved worktree-relative host scope uses verified canonical Git
+  identity plus canonical worktree-relative cwd equality instead of absolute cwd
+  equality, without changing execution cwd (§8).
 - Native mutation authorization is complete before the native operation begins.
 
 ## 15. Fail-closed behavior

@@ -9,7 +9,13 @@ import type { SessionGrantStore } from "./session-grants.js";
 import type { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
 import type { ApprovalResponse, Capability, EscalationApprovalRequest, SandboxApprovalDecision, WideningUnavailableReason } from "./types.js";
 
-export type ApprovalProject = { projectId: string; grants: ProjectGrantStore; hostGrants?: ProjectHostCommandGrantStore };
+export type ApprovalProject = {
+  projectId: string;
+  /** Present only when startup Git discovery succeeded; never the cwd fallback. */
+  gitProjectId?: string;
+  grants: ProjectGrantStore;
+  hostGrants?: ProjectHostCommandGrantStore;
+};
 
 const unavailableMessages = {
   "filesystem-write-scope-unavailable": "Filesystem write scope preparation rejected widening. A configured deny root may cover a target or its required Git/directory scope. No sandbox resource retry is offered for this attempt, including any network targets.",
@@ -59,7 +65,7 @@ export async function requestEscalationApproval(context: EscalationUI, request: 
   const sessionId = request.sessionGrantEligible ? context.sessionManager?.getSessionId() : undefined;
   const hostCommand = request.commandIdentity;
   const audit = context.approvalAudit;
-  if (lookupResult(audit, "host", "project", hostCommand && project?.hostGrants ? await (lookupStart(audit, "host", "project"), project.hostGrants.covers(project.projectId, hostCommand)) : undefined)) return "host-allow-project";
+  if (lookupResult(audit, "host", "project", hostCommand && project?.hostGrants ? await (lookupStart(audit, "host", "project"), project.hostGrants.covers(project.projectId, hostCommand, project.gitProjectId)) : undefined)) return "host-allow-project";
   if (lookupResult(audit, "host", "session", hostCommand && sessionId ? (lookupStart(audit, "host", "session"), hostGrants.covers(sessionId, hostCommand)) : undefined)) return "host-allow-session";
   const durations = (capabilities: readonly Capability[]): ApprovalDuration[] => {
     const available: ApprovalDuration[] = ["once"];
@@ -112,7 +118,9 @@ async function requestHostApproval(context: EscalationUI, request: EscalationApp
   if (command && project?.hostGrants) available.push("project");
   const chosen = await approvalSelect(context, "host-duration", "Run outside sandbox — duration", available.map(value => durationLabels[value]), { signal: context.signal });
   const duration = available.find(value => durationLabels[value] === chosen);
-  if (!duration) return "deny";
+  if (!duration || context.signal?.aborted) return "deny";
+  const relativeCwd = duration === "project" && command && project?.hostGrants
+    ? await project.hostGrants.gitProjectCwd(project.projectId, command, project.gitProjectId) : undefined;
   const message = [
     "Run exact command outside sandbox", "WARNING: Sandbox protections will not apply to this execution.",
     "", "Command", displayText(request.command),
@@ -120,13 +128,25 @@ async function requestHostApproval(context: EscalationUI, request: EscalationApp
       : ["Working directory could not be canonicalized. Only Once is available."]),
     `Duration: ${durationLabels[duration]}`,
     ...(duration === "project" && project ? [`Project: ${displayText(project.projectId)}`] : []),
+    ...(relativeCwd !== undefined ? [
+      `Cwd scope: the same canonical worktree-relative cwd in this Git project's main/linked worktrees, including future Pi sessions.`,
+      `Worktree-relative cwd: ${displayText(relativeCwd)}`,
+      "Other relative working directories are NOT approved; this does not approve every cwd or descendants.",
+      "Execution stays in the caller's working directory; it is NOT changed to the project base.",
+      "WARNING: Relative paths, local scripts, configuration and repository content can still differ between worktrees at this same relative cwd. The same command can have different effects and execute different code."
+    ] : ["Cwd scope: this exact canonical working directory only.",
+      ...(duration === "project" ? ["Git project/worktree-relative cwd could not be verified. This project approval will NOT be shared across working directories."] : [])]),
     "", "The entire command will run again and may repeat earlier side effects.",
-    "This approval is for the exact command, working directory and execution mode — not a resource permission."
+    "This approval is for the exact command and execution mode within the cwd scope above — not a resource permission, command prefix, or general shell permission."
   ].join("\n");
   if (await approvalSelect(context, "host-confirm", message, ["Run on host", "Deny"], { signal: context.signal }) !== "Run on host" || context.signal?.aborted) return "deny";
   auditEvent(context.approvalAudit, { event: "approval.selection", authority: "host", duration });
   if (duration === "project" && command && project?.hostGrants) {
-    try { await project.hostGrants.grant(project.projectId, command); auditEvent(context.approvalAudit, { event: "persist", authority: "host", duration: "project", outcome: "success" }); }
+    try {
+      if (relativeCwd !== undefined) await project.hostGrants.grantGitProject(project.projectId, command, project.gitProjectId, relativeCwd);
+      else await project.hostGrants.grant(project.projectId, command);
+      auditEvent(context.approvalAudit, { event: "persist", authority: "host", duration: "project", outcome: "success" });
+    }
     catch { auditEvent(context.approvalAudit, { event: "persist", authority: "host", duration: "project", outcome: "error" }); return "deny"; }
   }
   if (duration === "session" && sessionId && command) sessionPersistence(context.approvalAudit, "host", () => hosts.grant(sessionId, command));

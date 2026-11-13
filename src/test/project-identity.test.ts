@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { createApprovalProvider } from "../pi-extension.js";
 import { ProjectGrantStore } from "../project-grants.js";
 import { ProjectHostCommandGrantStore } from "../project-host-command-grants.js";
-import { resolveProjectIdentity } from "../project-identity.js";
+import { resolveGitProjectIdentity, resolveGitWorktreeCwd, resolveProjectIdentity, resolveProjectIdentityInfo } from "../project-identity.js";
 import { SessionGrantStore } from "../session-grants.js";
 import type { ApprovalRequest } from "../types.js";
 
@@ -97,6 +97,17 @@ test("separate Git metadata is the Git-reported base identity shared with linked
   // With --separate-git-dir Git reports the metadata directory as its base.
   assert.equal(await resolveProjectIdentity(main), await realpath(metadata));
   assert.equal(await resolveProjectIdentity(linked), await realpath(metadata));
+  const hosts = new ProjectHostCommandGrantStore(join(base, "hosts.json"));
+  const projectId = await realpath(metadata);
+  const command = { shellCommand: "sh /trusted/fixed.sh", cwd: await realpath(main), executionMode: "shell" };
+  await hosts.grantGitProject(projectId, command, projectId, ".");
+  for (const cwd of [main, linked]) {
+    assert.equal(await resolveGitProjectIdentity(cwd), projectId);
+    assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(cwd) }, projectId), true);
+  }
+  assert.equal(await resolveGitWorktreeCwd(metadata), undefined);
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(metadata) }, projectId), false);
+  await assert.rejects(hosts.grantGitProject(projectId, { ...command, cwd: await realpath(metadata) }, projectId, "."));
 });
 
 test("worktrees of a bare repository share the bare base directory identity", async t => {
@@ -109,4 +120,41 @@ test("worktrees of a bare repository share the bare base directory identity", as
   assert.equal(await resolveProjectIdentity(bare), await realpath(bare));
   assert.equal(await resolveProjectIdentity(linked), await realpath(bare));
   assert.notEqual(await resolveProjectIdentity(source), await resolveProjectIdentity(bare));
+  const hosts = new ProjectHostCommandGrantStore(join(base, "hosts.json"));
+  const projectId = await realpath(bare);
+  const command = { shellCommand: "sh /trusted/fixed.sh", cwd: await realpath(linked), executionMode: "shell" };
+  await hosts.grantGitProject(projectId, command, projectId, ".");
+  const linkedTwo = join(base, "linked-two");
+  await exec("git", ["-C", bare, "worktree", "add", "--detach", linkedTwo]);
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(linkedTwo) }, projectId), true);
+  assert.equal(await resolveGitWorktreeCwd(bare), undefined);
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(bare) }, projectId), false);
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(source) }, projectId), false);
+  const bareCommand = { ...command, cwd: await realpath(bare) };
+  await hosts.grant(projectId, bareCommand);
+  assert.equal(await hosts.covers(projectId, bareCommand, projectId), true);
+});
+
+test("identity discovery ignores inherited Git overrides without altering the execution environment", async t => {
+  const base = await mkdtemp(join(tmpdir(), "pi-project-git-env-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const main = join(base, "main"), other = join(base, "other"), plain = join(base, "plain");
+  await initialize(main); await initialize(other); await mkdir(plain);
+  const overrides = { GIT_DIR: join(main, ".git"), GIT_COMMON_DIR: join(main, ".git"), GIT_WORK_TREE: main,
+    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true" };
+  const original = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
+  Object.assign(process.env, overrides);
+  t.after(() => { for (const [key, value] of Object.entries(original)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+  assert.equal(await resolveGitProjectIdentity(other), await realpath(other));
+  assert.equal(await resolveGitProjectIdentity(plain), undefined);
+  assert.deepEqual(await resolveProjectIdentityInfo(plain), { projectId: await realpath(plain) });
+  const hosts = new ProjectHostCommandGrantStore(join(base, "hosts.json"));
+  const projectId = await realpath(main);
+  const command = { shellCommand: "fixed", cwd: projectId, executionMode: "shell" };
+  await hosts.grantGitProject(projectId, command, projectId, ".");
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(other) }, projectId), false);
+  assert.equal(await hosts.covers(projectId, { ...command, cwd: await realpath(plain) }, projectId), false);
+  for (const [key, value] of Object.entries(overrides)) assert.equal(process.env[key], value);
 });
