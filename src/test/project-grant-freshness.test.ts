@@ -102,11 +102,12 @@ for (const fixture of fixtures) {
       await new ${fixture.className}(${JSON.stringify(path)}).grant(${JSON.stringify(project)}, ${JSON.stringify(fixture.value(index))});
     `])));
     // Last-writer-wins, not a lossless transaction: only a nonempty subset is guaranteed.
-    const expected = indices.flatMap<unknown>(index => fixture.value(index));
+    const expected = indices.flatMap<unknown>(index => fixture.name === "host"
+      ? { ...command(index), cwdScope: "exact-cwd" } : fixture.value(index));
     const entries = await reader.entries();
     assert.ok(entries.length > 0);
     for (const entry of entries) assert.ok(expected.some(value => JSON.stringify(value) === JSON.stringify(entry)));
-    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 1);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, fixture.name === "host" ? 3 : 1);
 
     // Same-process writers must also use distinct temporary files even in one millisecond.
     t.mock.method(Date, "now", () => 12345);

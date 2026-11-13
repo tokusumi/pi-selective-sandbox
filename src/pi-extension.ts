@@ -26,7 +26,7 @@ import { runTracedSandbox } from "./strace-runner.js";
 import { CapabilityPolicy } from "./policy.js";
 import { ProjectGrantStore } from "./project-grants.js";
 import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
-import { resolveProjectIdentity } from "./project-identity.js";
+import { resolveProjectIdentityInfo } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
 import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, ExecutionResult, SkillAuthority } from "./types.js";
@@ -200,13 +200,13 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
       // unwritable even after the user widens an ancestor (including /).
       writePolicy = { allow: resolved.allow, deny: [...resolved.deny, protectedRoot] };
       gitWritePaths = await resolveGitWritePaths(cwd, writePolicy);
-      const projectId = await resolveProjectIdentity(cwd);
-      if (projectId) {
+      const identity = await resolveProjectIdentityInfo(cwd);
+      if (identity) {
         const projectGrants = new ProjectGrantStore(join(getAgentDir(), "pi-selective-sandbox", "project-grants.json"));
         const projectHostGrants = new ProjectHostCommandGrantStore(join(getAgentDir(), "pi-selective-sandbox", "host-command-grants.json"));
         // Identity is fixed at setup; persistent approvals are read per lookup,
         // including changes made later by other sessions and native children.
-        project = { projectId, grants: projectGrants, hostGrants: projectHostGrants };
+        project = { ...identity, grants: projectGrants, hostGrants: projectHostGrants };
       }
     })();
     await setup;
