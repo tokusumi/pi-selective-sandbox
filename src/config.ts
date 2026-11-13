@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
 import { DEFAULT_NETWORK_PROFILES, normalizeNetworkPattern } from "./network-policy.js";
 
 export type SelectiveSandboxConfig = {
+  skills?: { trustedSkillPaths: string[] };
   network?: { extraAllowedDomains: string[]; disabledDefaultProfiles?: string[]; allowLocalBinding?: boolean };
   filesystem: {
     extraWritableRoots: string[];
@@ -32,7 +34,7 @@ function rejectUnknownFields(value: Record<string, unknown>, allowed: readonly s
 
 export function parseConfig(value: unknown): SelectiveSandboxConfig {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("config must be an object");
-  rejectUnknownFields(value as Record<string, unknown>, ["filesystem", "network"], "config");
+  rejectUnknownFields(value as Record<string, unknown>, ["filesystem", "network", "skills"], "config");
   const filesystem = (value as { filesystem?: unknown }).filesystem;
   if (filesystem !== undefined && (typeof filesystem !== "object" || filesystem === null || Array.isArray(filesystem))) {
     throw new Error("filesystem must be an object");
@@ -63,6 +65,18 @@ export function parseConfig(value: unknown): SelectiveSandboxConfig {
     parsed.network = { extraAllowedDomains };
     if (networkFields.disabledDefaultProfiles !== undefined) parsed.network.disabledDefaultProfiles = disabledNetworkProfiles;
     if (networkFields.allowLocalBinding !== undefined) parsed.network.allowLocalBinding = networkFields.allowLocalBinding as boolean;
+  }
+  const skills = (value as { skills?: unknown }).skills;
+  if (skills !== undefined) {
+    if (typeof skills !== "object" || skills === null || Array.isArray(skills)) throw new Error("skills must be an object");
+    rejectUnknownFields(skills as Record<string, unknown>, ["trustedSkillPaths"], "skills");
+    const paths = stringArray((skills as { trustedSkillPaths?: unknown }).trustedSkillPaths, "skills.trustedSkillPaths");
+    for (const path of paths) {
+      if ((!isAbsolute(path) && !path.startsWith("~/")) || basename(path) !== "SKILL.md" || /[\x00-\x1f\x7f*?\[\]{}]/.test(path)) {
+        throw new Error("skills.trustedSkillPaths must contain exact absolute or ~/ paths to SKILL.md (no patterns)");
+      }
+    }
+    parsed.skills = { trustedSkillPaths: [...new Set(paths)] };
   }
   return parsed;
 }
