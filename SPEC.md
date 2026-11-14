@@ -792,7 +792,13 @@ failures fall back to ordinary sandbox execution, not automatic host execution.
 ## 15. Fail-closed behavior
 
 Sandbox initialization or wrapping failure returns a sandbox-unavailable result
-and does not run the host command. Missing UI, missing eligible grant, malformed
+and does not run the host command. Runner exceptions after wrapping, including
+command timeouts and cancellation, are propagated to Pi's bash tool instead of
+being converted to sandbox-unavailable/exit 126. Per-attempt resources are still
+released, and these exceptions do not trigger denial observation, approval, or
+automatic replay. Pi retains its normal timeout/abort message and partial output;
+a later invocation may use the same runtime without environment recovery.
+Missing UI, missing eligible grant, malformed
 persistent grant data, unavailable project identity, and persistent-store write
 failure deny the relevant reusable authorization. Unknown or unapproved
 violations do not receive implicit host fallback.

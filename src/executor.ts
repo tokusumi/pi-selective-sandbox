@@ -40,9 +40,21 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
       const trace: ApprovalTrace | undefined = approvalsUsed === 0 ? initialTrace : diagnostics ? { originId: diagnostics.originId, operationId: operationId!, requestId: randomUUID(), attempt: approvalsUsed,
         actor: this.options.diagnosticActor ?? "parent", tool: "bash", callId: initialTrace?.callId } : undefined;
       currentTrace = trace;
-      let attempt: CommandResult;
-      try { attempt = await this.runSandbox(command, commandId, granted); }
+      let wrapped: string;
+      try { wrapped = await runtime.wrap(command, { commandId, commandText: command, cwd: this.options.cwd, extraCapabilities: granted }); }
       catch (error) { await runtime.forgetCommand?.(commandId); return complete(this.unavailable(error)); }
+      let attempt: CommandResult;
+      try { attempt = await runner.runSandbox(wrapped, runtime.traceSinkForCommand?.(commandId)); }
+      catch (error) {
+        // Runner exceptions include Pi's timeout/abort signals, not evidence
+        // that sandbox setup failed. Preserve them for the calling bash tool.
+        await runtime.forgetCommand?.(commandId);
+        if (trace) {
+          diagnostics!.emit(trace, { event: "attempt.result", execution: "sandbox", outcome: "error" });
+          diagnostics!.emit(trace, { event: "operation.end", execution: "sandbox", disposition: "sandbox", outcome: "error" });
+        }
+        throw error;
+      }
       if (trace) diagnostics!.emit(trace, { event: "attempt.result", execution: "sandbox", exitCode: attempt.exitCode, outcome: attempt.exitCode === 0 ? "success" : "error" });
       if (approvalsUsed > 0) this.status(`retry exit=${attempt.exitCode}`);
       if (attempt.exitCode === 0) { await runtime.forgetCommand?.(commandId); return complete(this.finish(attempt, "sandbox", priorViolations)); }
@@ -170,7 +182,6 @@ export class SelectiveSandboxExecutor { constructor(private readonly options: Se
     } catch { /* Diagnostics cannot grant authority or change execution/approval decisions. */ }
   }
   private status(value: string): void { this.options.onStatus?.(`<sandbox: ${value}>`); }
-  private async runSandbox(command: string, commandId: string, caps: readonly Capability[]): Promise<CommandResult> { const runtime = this.options.runtime!; const wrapped = await runtime.wrap(command, { commandId, commandText: command, cwd: this.options.cwd, extraCapabilities: caps }); return this.options.runner.runSandbox(wrapped, runtime.traceSinkForCommand?.(commandId)); }
   private unavailable(error?: unknown): ExecutionResult {
     const configured = this.options.sandboxUnavailableMessage;
     const message = typeof configured === "function" ? configured(error) : configured;

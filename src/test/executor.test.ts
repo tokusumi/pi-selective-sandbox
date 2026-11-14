@@ -245,6 +245,47 @@ test("sandbox wrapping failure can be classified without host fallback", async (
   assert.equal(f.calls.sandbox + f.calls.elevated + f.calls.approvals, 0);
 });
 
+for (const message of ["timeout:0.5", "aborted", "spawn /bin/bash ENOENT"]) {
+  test(`runner error propagates without sandbox-unavailable or replay: ${message}`, async () => {
+    const f = fixtures([{ kind: "filesystem.write", resource: "/blocked/file" }]);
+    const error = new Error(message);
+    const forgotten: string[] = [];
+    let observed = 0, classified = 0;
+    f.runner.runSandbox = async () => { f.calls.sandbox++; throw error; };
+    f.runtime.getViolationsForCommand = () => { observed++; return []; };
+    f.runtime.forgetCommand = id => { forgotten.push(id); };
+    const executor = new SelectiveSandboxExecutor({
+      runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]),
+      sandboxUnavailableMessage: () => { classified++; return "Sandbox unavailable"; }
+    });
+    await assert.rejects(executor.execute("slow command", "runner-error", "bash", { retryOnSandboxDenial: true }), value => value === error);
+    assert.deepEqual(forgotten, ["runner-error"]);
+    assert.equal(observed + classified + f.calls.approvals + f.calls.elevated, 0);
+    assert.equal(f.calls.sandbox, 1);
+    // The same runtime remains usable; a timeout is not a persistent setup failure.
+    f.runner.runSandbox = async () => { f.calls.sandbox++; return result(0); };
+    assert.equal((await executor.execute("next command", "next-call")).disposition, "sandbox");
+    assert.deepEqual(forgotten, ["runner-error", "next-call"]);
+  });
+}
+
+test("a widened attempt timeout releases its own resources and does not replay again", async () => {
+  const f = fixtures([{ kind: "filesystem.write", resource: "/blocked/file" }]);
+  const error = new Error("timeout:1");
+  const forgotten: string[] = [];
+  f.runtime.forgetCommand = id => { forgotten.push(id); };
+  f.runner.runSandbox = async () => {
+    if (++f.calls.sandbox === 1) return result(1);
+    throw error;
+  };
+  const executor = new SelectiveSandboxExecutor({ runtime: f.runtime, runner: f.runner, approvals: f.approvals, policy: new CapabilityPolicy([]) });
+  await assert.rejects(executor.execute("slow write", "widen-timeout", "bash", { retryOnSandboxDenial: true }), value => value === error);
+  assert.deepEqual(forgotten, ["widen-timeout", "widen-timeout:widened:1"]);
+  assert.equal(f.calls.sandbox, 2);
+  assert.equal(f.calls.approvals, 1);
+  assert.equal(f.calls.elevated, 0);
+});
+
 test("redaction occurs before results are returned", async () => {
   const f = fixtures();
   f.runner.runSandbox = async () => result(0, "ghp_verysecret");
