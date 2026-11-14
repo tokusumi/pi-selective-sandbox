@@ -210,6 +210,57 @@ test("headless bash result exposes actionable communication reports to the model
   assert.match(text, /approval-denied/);
 });
 
+for (const interruption of ["timeout", "abort"] as const) {
+  test(`bash preserves Pi's ${interruption} message and partial output, then accepts another command`, async t => {
+    const base = await mkdtemp(join(tmpdir(), "pi-bash-interruption-"));
+    const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = base;
+    t.after(async () => {
+      if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+      await rm(base, { recursive: true, force: true });
+    });
+    const forgotten: string[] = [];
+    let observations = 0, approvals = 0;
+    const runtime: SandboxRuntime = {
+      // Separate writes exercise whole-output redaction across chunk boundaries.
+      // Use the real local shell backend, with no nested OS sandbox required.
+      wrap: async command => command === "slow fixture" ? `printf 'partial ghp_'; sleep 0.05; printf '${"A".repeat(36)} ready\\n'; sleep 10` : "printf recovered",
+      getViolationsForCommand: () => { observations++; return []; },
+      forgetCommand: id => { forgotten.push(id); }
+    };
+    const initialize = t.mock.method(AnthropicSandboxRuntime, "initialize", async () => runtime as AnthropicSandboxRuntime);
+    const tools = new Map<string, ToolDefinition>();
+    await selectiveSandboxExtension({ on: () => undefined, registerCommand: () => undefined,
+      registerTool: (tool: ToolDefinition) => { tools.set(tool.name, tool); }
+    } as never);
+    const context = { cwd: process.cwd(), hasUI: true, ui: { select: async () => { approvals++; return "Deny"; } } } as never;
+    const controller = new AbortController();
+    const updates: string[] = [];
+    const pending = tools.get("bash")!.execute("interrupted", { command: "slow fixture", timeout: interruption === "timeout" ? 0.5 : 5,
+      retryOnSandboxDenial: true }, controller.signal, update => {
+      updates.push(JSON.stringify(update.content));
+      if (interruption === "abort" && JSON.stringify(update.content).includes("ready")) controller.abort();
+    }, context);
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /partial/);
+      assert.match(error.message, /\[REDACTED:GitHub Token\]/);
+      assert.match(error.message, interruption === "timeout" ? /Command timed out after 0\.5 seconds/ : /Command aborted/);
+      assert.doesNotMatch(`${error.message}\n${error.stack}`, /Sandbox unavailable|code 126|ghp_A/);
+      return true;
+    });
+    assert.doesNotMatch(updates.join(""), /ghp_A|Sandbox unavailable/);
+    assert.deepEqual(forgotten, ["interrupted"]);
+    assert.equal(observations + approvals, 0);
+    const output = await tools.get("bash")!.execute("after-interruption", { command: "next fixture", timeout: 5 }, new AbortController().signal, () => {}, context);
+    assert.match(JSON.stringify(output.content), /recovered/);
+    assert.notEqual(output.isError, true);
+    assert.equal(initialize.mock.callCount(), 1);
+    assert.deepEqual(forgotten, ["interrupted", "after-interruption"]);
+  });
+}
+
 test("a running extension refreshes project capabilities for each bash invocation", async t => {
   const base = await mkdtemp(join(tmpdir(), "pi-extension-grant-refresh-"));
   const originalAgentDir = process.env.PI_CODING_AGENT_DIR;

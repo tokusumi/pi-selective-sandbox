@@ -401,7 +401,17 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
           }
         }
       });
-      const output = await sandboxedBash.execute(id, params, signal, onUpdate);
+      let output: Awaited<ReturnType<typeof sandboxedBash.execute>>;
+      try {
+        output = await sandboxedBash.execute(id, params, signal,
+          onUpdate ? update => onUpdate(redactToolResult(update)) : undefined);
+      } catch (error) {
+        // Pi assembles partial output into timeout/abort errors. A token may
+        // span chunks, so redact the complete message as well as each chunk.
+        // Do not retain an unredacted cause or stack in the outward error.
+        if (error instanceof Error) throw new Error(redact_text(error.message).redacted);
+        throw error;
+      }
       // Preserve Pi's output/error/structured exit data. Only closed observation
       // facts go in details; no new raw scope, message or command persistence.
       return redactToolResult(execution ? { ...output, details: { ...output.details, selectiveSandbox: {
