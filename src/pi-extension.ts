@@ -29,7 +29,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentityInfo } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
-import type { SandboxSwitches } from "./session-switches.js";
+import { DEFAULT_SANDBOX_SWITCHES, type SandboxSwitches } from "./session-switches.js";
 import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, ExecutionResult, SkillAuthority } from "./types.js";
 
 const debug = debuglog("pi-selective-sandbox");
@@ -147,8 +147,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   if (sessionAuditEnabled && diagnostics) sessionAudit = createSessionAuditSink((type, data) => pi.appendEntry(type, data), diagnostics.originId);
   const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi, diagnostics });
   const commandNamespace = randomUUID();
-  let enabled = true;
-  const restrictions = { network: true, socket: true };
+  let enabled = DEFAULT_SANDBOX_SWITCHES.enabled;
+  const restrictions = { network: DEFAULT_SANDBOX_SWITCHES.network, socket: DEFAULT_SANDBOX_SWITCHES.socket };
   let monitorDisabled = false;
   let monitorWarningShown = false;
   let switchUpdates = Promise.resolve();
@@ -202,8 +202,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
           : target === "socket" && process.platform === "linux"
             ? " Ubuntu's baseline leaves Unix sockets unrestricted." : "";
         context.ui.notify(mode === "off"
-          ? `${scope} restrictions disabled for subsequent bash operations in this session and its native subagents; access is allowed. Filesystem restrictions are unchanged. Use /selective-sandbox ${target} on to restore the baseline.${platformNote}`
-          : `${scope} restrictions restored to the platform baseline for subsequent bash operations in this session and its native subagents.${platformNote}${enabled ? "" : " Sandbox enforcement is still off; use /selective-sandbox on to enable it."}`,
+          ? `${scope} restrictions disabled for subsequent bash operations in this session and its native subagents; access is allowed. Filesystem restrictions are unchanged. Use /selective-sandbox ${target} on to enable restrictions.${platformNote}`
+          : `${scope} restrictions enabled for subsequent bash operations in this session and its native subagents.${platformNote}${enabled ? "" : " Sandbox enforcement is still off; use /selective-sandbox on to enable it."}`,
           mode === "off" ? "warning" : "info");
         return;
       }

@@ -3,7 +3,6 @@ import { getMacOSSandboxLogMonitorStatus } from "@anthropic-ai/sandbox-runtime/d
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { promisify } from "node:util";
 import type { WritePolicy } from "./filesystem-policy.js";
 import { StraceViolationObserver, STRACE_ARGS, STRACE_BINARY } from "./strace-observer.js";
 import type { SandboxObservationDiagnostic, SandboxRuntime, SandboxViolation, UnsupportedCommunicationDenial } from "./types.js";
@@ -157,19 +156,20 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
   private readonly observationDiagnostics = new Map<string, SandboxObservationDiagnostic>();
   private readonly monitorAtStart = new Map<string, ReturnType<typeof getMacOSSandboxLogMonitorStatus>>();
   private commandKey(id: string): string { return sandboxCommandKey(this.namespace, id); }
-  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, readonly logMonitorEnabled: boolean) {
+  private constructor(private readonly settings: SandboxSettings, private readonly useStrace: boolean, private readonly ubuntu: boolean, readonly logMonitorEnabled: boolean) {
     this.namespace = settings.commandNamespace ?? randomUUID();
   }
 
   static async initialize(settings: SandboxSettings, enableLogMonitor = process.platform === "darwin"): Promise<AnthropicSandboxRuntime> {
     const ubuntu = await isUbuntu();
-    if (ubuntu) {
-      try { await promisify(execFile)(STRACE_BINARY, [...STRACE_ARGS, "/usr/bin/true"], { timeout: 5000 }); }
-      catch (cause) { throw new Error("Ubuntu filesystem observation requires working strace.", { cause }); }
+    const useStrace = process.platform === "linux";
+    if (useStrace) {
+      try { await new Promise<void>((resolve, reject) => execFile(STRACE_BINARY, [...STRACE_ARGS, "/usr/bin/true"], { timeout: 5000 }, error => error ? reject(error) : resolve())); }
+      catch (cause) { throw new Error("Linux filesystem observation requires working strace.", { cause }); }
     }
     // Linux's startup-policy observer cannot account for per-command grants.
     enableLogMonitor = process.platform === "darwin" && enableLogMonitor;
-    const instance = new AnthropicSandboxRuntime(settings, ubuntu, enableLogMonitor);
+    const instance = new AnthropicSandboxRuntime(settings, useStrace, ubuntu, enableLogMonitor);
     const shared = sharedRuntime();
     shared.instances.add(instance);
     try { await shared.manager.initialize(buildSandboxRuntimeConfig(settings, ubuntu), undefined, enableLogMonitor); }
@@ -221,7 +221,7 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         } } : {})
       }, undefined, { ...context, commandId: this.commandKey(context.commandId),
         allowAllNetwork: process.platform === "darwin" && !restrictions.network,
-        allowAllUnixSockets: this.useStrace || !restrictions.socket,
+        allowAllUnixSockets: this.ubuntu || !restrictions.socket,
         ...(proxy ? { networkProxy: proxy } : {}) });
     } catch (error) {
       await this.forgetCommand(context.commandId);
@@ -277,10 +277,30 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         return [{ ...violationFromLine(raw), message: event.line }];
       });
     };
-    let upstream = read();
-    if (process.platform === "darwin" && this.logMonitorEnabled && upstream.length === 0) {
-      // SDK log events can arrive after process exit. Only this invocation's
-      // events end the bounded wait; an ordinary failure still returns empty.
+    const collected = new Map<string, SandboxViolation>();
+    const collectedCommunication = new Map<string, UnsupportedCommunicationDenial>();
+    const collect = (): SandboxViolation[] => {
+      const current = read();
+      // The shared SDK store is bounded and can evict this command's events
+      // while other commands run. Preserve observed records across snapshots.
+      for (const violation of current) {
+        const key = JSON.stringify(violation);
+        if (collected.size >= 1000 && !collected.has(key)) throw new Error("Sandbox denial collection limit exceeded; approval was not attempted.");
+        collected.set(key, violation);
+      }
+      for (const denial of communicationDenials) {
+        const key = JSON.stringify(denial);
+        if (collectedCommunication.size >= 1000 && !collectedCommunication.has(key)) throw new Error("Sandbox denial collection limit exceeded; approval was not attempted.");
+        collectedCommunication.set(key, denial);
+      }
+      communicationDenials = [...collectedCommunication.values()];
+      return [...collected.values()];
+    };
+    let upstream = collect();
+    if (process.platform === "darwin" && this.logMonitorEnabled) {
+      // SDK events can arrive after process exit and out of order. Keep the
+      // bounded collection window even if an earlier denial is already present;
+      // the first event may be unrelated to the failure and hide later events.
       upstream = await new Promise<SandboxViolation[]>((resolve, reject) => {
         let unsubscribe: (() => void) | undefined;
         let finished = false;
@@ -294,8 +314,8 @@ export class AnthropicSandboxRuntime implements SandboxRuntime {
         };
         const check = (deadline = false) => {
           try {
-            const result = read();
-            if (result.length > 0 || deadline) finish(result);
+            const result = collect();
+            if (deadline) finish(result);
           } catch (error) { finish([], error); }
         };
         const timer = setTimeout(() => check(true), MACOS_DENIAL_WAIT_MS);

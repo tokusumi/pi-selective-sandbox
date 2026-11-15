@@ -113,11 +113,9 @@ Toggle these restrictions independently without disabling filesystem enforcement
 | `/selective-sandbox network off` | Allow unrestricted IP traffic on macOS, bypassing the destination allowlist and sandbox proxy |
 | `/selective-sandbox network on` | Restore the configured network baseline and eligible endpoint grants |
 | `/selective-sandbox socket off` | Allow all Unix-domain sockets |
-| `/selective-sandbox socket on` | Restore the platform's Unix-socket baseline |
+| `/selective-sandbox socket on` | Enable the platform's Unix-socket restrictions where supported |
 
-Here **off disables the restriction**, not communication. Both switches start
-on in the owning parent and reset when that parent reloads, replaces its session
-or restarts. All three switches propagate to its new and existing native
+Here **off disables the restriction**, not communication. Network restrictions start on; Unix-socket restrictions start **off**. Both reset to these defaults when the owning parent reloads, replaces its session or restarts. All three switches propagate to its new and existing native
 subagents, including nested/retained children, at the next `bash`/`write`/`edit`
 operation. Change switches in the owning parent; bound children cannot override
 them. Temporary state is shared through the protected parent-session transport,
@@ -125,6 +123,8 @@ not configuration or approvals. Each bash operation, including its retries,
 keeps the snapshot it started with; existing processes are not revoked or changed. The global `/selective-sandbox off` overrides both switches;
 global `on` preserves their individual settings. Component `on` does not enable
 global enforcement when it is off.
+
+**Security:** Unix sockets are unrestricted by default. A reachable host service can act outside the sandbox, including reading secrets, relaying network traffic, or modifying files; direct filesystem and IP restrictions do not contain those effects. Use `socket on` where that isolation is required and supported.
 
 Network-off allows direct TCP/UDP, DNS, private/LAN destinations and listeners
 on any interface; it adds no arbitrary Mach-service permission. Inherited user
@@ -198,7 +198,7 @@ sandbox configuration or failed discovery grant no helper authority.
 System certificate verification works by default, including `gh` and Go HTTPS
 clients. Every macOS attempt permits the exact `com.apple.trustd.agent` Mach
 service; no extra approval or host replay is needed for certificate verification.
-This does not allow arbitrary Mach services or Unix sockets, change the endpoint
+This does not allow arbitrary Mach services, change the endpoint
 allowlist, or disable TLS verification. The OS certificate-validation daemon is
 trusted infrastructure: its own certificate-related network activity is outside
 the command's proxy policy. This baseline also applies with local binding disabled
@@ -221,7 +221,7 @@ the external allowlist; localhost is a trusted boundary in this mode.
 on all interfaces, so bind test/dev servers explicitly to `127.0.0.1` or `::1`
 to avoid LAN exposure. IPv4-mapped IPv6 loopback connects are not matched by
 Seatbelt; the SDK forces Java's IPv4 stack, but other clients may need native
-IPv4 or IPv6 loopback sockets. Unix sockets remain restricted on macOS.
+IPv4 or IPv6 loopback sockets. Unix sockets are unrestricted by default; use `/selective-sandbox socket on` to restrict them on macOS.
 
 Set `network.allowLocalBinding` to `false` to restore the proxy-only local TCP
 policy. This is independent of destination profiles; disabling all destination profiles
@@ -379,8 +379,8 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 
 | Platform | Filesystem | Network | Unix sockets |
 | --- | --- | --- | --- |
-| macOS | Isolated | External egress isolated; local networking allowed by default | Isolated |
-| Other Linux | Isolated | Not supported | Isolated |
+| macOS | Isolated | External egress isolated; local networking allowed by default | Unrestricted by default; opt-in isolation |
+| Other Linux | Isolated | Not supported | Unrestricted by default; opt-in isolation |
 | Ubuntu | Isolated | Not supported | Unrestricted |
 
 On macOS, SDK log monitoring is explicitly enabled. SDK stream events supply
@@ -411,8 +411,8 @@ is outside the supported feature contract.
 On the tested Ubuntu 24.04 host, restrictive AppArmor policy blocks the nested
 user namespace that the runtime's Unix-socket isolation would require.
 
-Ubuntu also requires `strace` as its filesystem violation observer. The
-extension checks `strace` availability and basic ptrace operation at startup.
+Linux requires `/usr/bin/strace` as its filesystem violation observer, including when socket restrictions are enabled. The
+extension checks strace availability, required arguments, and basic ptrace operation at startup.
 It traces the Bubblewrap command, ignores Bubblewrap setup calls, and
 attributes only failed write syscalls with `EROFS` against the existing write
 policy. Trace data is carried on a parent-owned pipe; command output uses a
