@@ -108,7 +108,7 @@ export function sandboxDenialReport(violations: readonly SandboxViolation[], con
       nextSteps: local ? [...ipcSteps] : ["Obtain correlated socket-family and peer evidence before choosing a permission. Do not infer AF_UNIX from a tmux command or stderr."]
     });
   }
-  if (denials.length === 0 && (violations.length > 0 || !context.observation)) return undefined;
+  if (denials.length === 0 && !context.retryNotRequested && (violations.length > 0 || !context.observation)) return undefined;
   const bounded = denials.slice(0, 8).map(denial => {
     if (!denial.target || denial.target.length <= 1024) return denial;
     return { ...denial, target: denial.target.slice(0, 1024), targetTruncated: true as const,
@@ -116,13 +116,14 @@ export function sandboxDenialReport(violations: readonly SandboxViolation[], con
   });
   return {
     version: 1, attempt: context.attempt,
-    observation: denials.length ? "correlated-denial" : "unconfirmed", denials: bounded,
+    observation: denials.length || violations.length ? "correlated-denial" : "unconfirmed", denials: bounded,
     omittedDenials: denials.length - bounded.length,
-    nextSteps: denials.length ? (context.retryNotRequested ? ["Retry was not requested. The original command result is returned without scope preparation, approval, or replay."] : []) : [
+    nextSteps: denials.length || violations.length ? (context.retryNotRequested ? ["Retry was not requested. The original command result is returned without scope preparation, approval, or replay.",
+      "Inspect the command result and correlated evidence first. If repeating the entire command to address denied access is appropriate, a new bash invocation can set retryOnSandboxDenial: true; this requests the approval flow, not permission or a guaranteed prompt. Consider isolating the failed operation to avoid repeating earlier side effects."] : []) : [
       "Check any observation/monitor warning and obtain observer/proxy records correlated with this invocation before choosing a permission.",
       "If no sandbox denial can be established, diagnose the command's ordinary error instead of widening permissions."
     ],
-    caution: denials.length
+    caution: denials.length || violations.length
       ? "These observer denials are correlated with this sandbox attempt, not proof of the cause of every command error. Guidance grants no authority."
       : "No supported correlated denial was established. The command may have an ordinary error; do not infer a permission from stderr or retry on the host."
   };

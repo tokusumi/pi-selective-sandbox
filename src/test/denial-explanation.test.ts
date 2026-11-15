@@ -128,6 +128,9 @@ test("unrequested retry still explains network denials without claiming scope pr
   assert.match(report.denials[0].nextSteps.join(" "), /scope preparation and approval were not attempted/);
   assert.doesNotMatch(report.denials[0].nextSteps.join(" "), /Check other blocked scopes\/deny rules/);
   assert.match(report.nextSteps.join(" "), /original command result/);
+  assert.match(report.nextSteps.join(" "), /retryOnSandboxDenial: true/);
+  assert.match(report.nextSteps.join(" "), /entire command/);
+  assert.match(report.nextSteps.join(" "), /not permission or a guaranteed prompt/);
   for (const throwSink of [false, true]) {
     const s = await execute([endpoint, ipc], { retryOnSandboxDenial: false, throwSink });
     assert.match(s.events[0], /sandbox-denial-report/);
@@ -139,6 +142,17 @@ test("unrequested retry still explains network denials without claiming scope pr
     assert.equal(s.hostCalls, 0);
     assert.deepEqual(s.applied, [[]]);
   }
+});
+
+test("filesystem-only unrequested denial includes retry guidance without implying network evidence", async () => {
+  const result = await execute([{ kind: "filesystem.write", resource: "/outside/file" }], { retryOnSandboxDenial: false });
+  const report = JSON.parse(result.events[0].split("\n")[1]);
+  assert.equal(report.observation, "correlated-denial");
+  assert.deepEqual(report.denials, []);
+  assert.match(report.nextSteps.join(" "), /retryOnSandboxDenial: true/);
+  assert.equal(result.approvals, 0);
+  assert.equal(result.hostCalls, 0);
+  assert.equal(result.sandboxCalls, 1);
 });
 
 test("agent report is redacted and emitted before approval even when headless/denied by policy", async () => {

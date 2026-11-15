@@ -70,22 +70,22 @@ async function fixture(t: test.TestContext) {
   await handlers.get("session_start")!({}, context);
   return {
     tool: tools.get("bash")!, spawned, wrapped, titles, answers, forgotten, sessionEvents,
-    run: (result: CommandResult, retryOnSandboxDenial?: unknown) => {
+    run: (result: CommandResult, retryOnSandboxDenial?: unknown, command = "opaque application") => {
       current = result;
-      return tools.get("bash")!.execute("fixture-call", { command: "opaque application", ...(retryOnSandboxDenial === undefined ? {} : { retryOnSandboxDenial }) },
+      return tools.get("bash")!.execute("fixture-call", { command, ...(retryOnSandboxDenial === undefined ? {} : { retryOnSandboxDenial }) },
         new AbortController().signal, () => {}, context as never);
     }
   };
 }
 
-test("registered bash exposes a default-off boolean intent and preserves streamed command status", async t => {
+test("registered bash permits explicit retry opt-out and preserves streamed command status", async t => {
   const f = await fixture(t);
   const schema = f.tool.parameters as { properties: Record<string, { type: string }>; required: string[] };
   assert.equal(schema.properties.retryOnSandboxDenial.type, "boolean");
   assert.ok(!schema.required.includes("retryOnSandboxDenial"));
-  assert.match(f.tool.description, /Nonzero exits are returned unchanged/);
+  assert.match(f.tool.description, /Correlated denials can trigger approval by default/);
   assert.ok(f.tool.promptGuidelines?.some(rule => rule.includes("retryOnSandboxDenial")));
-  for (const sample of commandOutcomeFixtures) for (const intent of [undefined, false]) {
+  for (const sample of commandOutcomeFixtures) for (const intent of [false]) {
     const before = f.spawned.length;
     const output = await f.run(sample.result, intent);
     const text = output.content.map(part => part.type === "text" ? part.text : "").join("");
@@ -116,7 +116,39 @@ test("registered bash exposes a default-off boolean intent and preserves streame
   assert.doesNotMatch(JSON.stringify(f.sessionEvents), /private denial fixture/);
 });
 
-test("bash opt-in reaches unchanged explicit host confirmation, and later default calls do not inherit it", async t => {
+test("Go install denial guides an explicit retry to host confirmation without silently replaying", async t => {
+  const f = await fixture(t);
+  const command = "command -v protoc && protoc --version && go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1";
+  const failure = { exitCode: 1, stdout: "/opt/homebrew/bin/protoc\nlibprotoc 36.2\n", stderr: "open /Users/example/go/bin/protoc-gen-go: operation not permitted\n" };
+  const initial = await f.run(failure, false, command);
+  const text = initial.content.map(part => part.type === "text" ? part.text : "").join("");
+  assert.match(text, /retryOnSandboxDenial: true/);
+  assert.equal(f.titles.length, 0);
+  assert.equal(f.spawned.length, 1);
+  f.answers.push("Run outside sandbox…", "Once", "Deny");
+  const denied = await f.run(failure, undefined, command);
+  assert.equal((denied.details as any).selectiveSandbox.disposition, "denied");
+  assert.match(f.titles.at(-1)!, /Sandbox protections will not apply/);
+  assert.equal(f.spawned.length, 2, "denied confirmation must not replay on the host");
+});
+
+test("default retry reuses an existing saved host permission", async t => {
+  const f = await fixture(t);
+  f.answers.push("Run outside sandbox…", "This session", "Run on host");
+  await f.run(commandOutcomeFixtures[0].result, true);
+  assert.equal(f.spawned.length, 2);
+  const prompts = f.titles.length;
+  const result = await f.run(commandOutcomeFixtures[0].result);
+  assert.equal((result.details as any).selectiveSandbox.disposition, "host");
+  assert.equal(f.spawned.length, 4, "saved permission permits host replay after the sandbox attempt");
+  assert.equal(f.titles.length, prompts, "saved permission avoids a second prompt");
+  const optedOut = await f.run(commandOutcomeFixtures[0].result, false);
+  assert.equal((optedOut.details as any).selectiveSandbox.retryNotRequested, true);
+  assert.equal(f.spawned.length, 5, "opt-out cannot replay even with a saved permission");
+  assert.equal(f.titles.length, prompts);
+});
+
+test("bash opt-in reaches unchanged explicit host confirmation, and later opt-out calls do not inherit it", async t => {
   const f = await fixture(t);
   // Malformed direct execute() inputs also cannot enable retry; normal Pi
   // schema validation happens before this method in production.
@@ -137,7 +169,7 @@ test("bash opt-in reaches unchanged explicit host confirmation, and later defaul
   assert.match(f.titles.at(-1)!, /Sandbox protections will not apply/);
   assert.match(f.titles.at(-1)!, /opaque application/);
   const prompts = f.titles.length;
-  const last = await f.run(commandOutcomeFixtures[0].result);
+  const last = await f.run(commandOutcomeFixtures[0].result, false);
   assert.equal((last.details as any).selectiveSandbox.retryNotRequested, true);
   assert.equal(f.titles.length, prompts);
   assert.equal(f.spawned.length, 5);
