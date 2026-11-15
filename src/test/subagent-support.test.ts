@@ -198,6 +198,7 @@ test("global, network and socket switches propagate to new and retained native c
   await run(child, childContext);
   assert.deepEqual(attempts.at(-1), { network: false, socket: false }, "global on preserves inherited component switches");
   await toggle(parent, "on", parentContext);
+  await parent.commands.get("selective-sandbox")!.handler("socket on", parentContext as never);
   await parent.commands.get("selective-sandbox")!.handler("network off", parentContext as never);
   // A bound descendant uses the same owning parent's companion, including companion-first loading.
   const grandchild = api();
@@ -265,7 +266,7 @@ test("parent switch changes do not rewrite a child's in-flight attempt or approv
   for (const args of ["off", "network off", "socket off"]) await parent.commands.get("selective-sandbox")!.handler(args, parentContext as never);
   release();
   assert.match(JSON.stringify((await inFlight).content), /approved-retry/);
-  assert.deepEqual(attempts, [{ network: true, socket: true }, { network: true, socket: true }]);
+  assert.deepEqual(attempts, [{ network: true, socket: false }, { network: true, socket: false }]);
   assert.match(JSON.stringify((await run("snapshot-next")).content), /next-operation/);
   assert.equal(attempts.length, 2, "only the next operation switches to global off");
 });

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import fs from "node:fs/promises";
+import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import type { RegisteredCommand, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
@@ -54,6 +55,9 @@ test("session switches are independent, validated, nonpersistent, and preserve n
     { value: "network on", label: "network on" }, { value: "network off", label: "network off" }
   ]);
   await parent.run();
+  assert.deepEqual(attempts.at(-1), { network: true, socket: false });
+  await parent.toggle("socket on");
+  await parent.run();
   assert.deepEqual(attempts.at(-1), { network: true, socket: true });
   await parent.toggle(" network\t off ");
   await parent.run();
@@ -78,9 +82,9 @@ test("session switches are independent, validated, nonpersistent, and preserve n
   await parent.toggle("on");
   await parent.run();
   assert.deepEqual(attempts.at(-1), { network: true, socket: false }, "global on does not reset a component switch");
-  const sibling = await session(); // A fresh runtime, like reload or a native child.
+  const sibling = await session(); // A fresh runtime resets to the session defaults.
   await sibling.run();
-  assert.deepEqual(attempts.at(-1), { network: true, socket: true });
+  assert.deepEqual(attempts.at(-1), { network: true, socket: false });
   await parent.run();
   assert.deepEqual(attempts.at(-1), { network: true, socket: false });
   await parent.toggle("socket on");
@@ -109,10 +113,12 @@ test("Linux adapter applies socket overrides without claiming network isolation"
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { ...platform, value: "linux" });
   const readFile = t.mock.method(fs, "readFile", async () => "ID=debian\n");
+  const probe = t.mock.method(childProcess, "execFile", ((...args: any[]) => { args.at(-1)(null, "", ""); return {}; }) as typeof childProcess.execFile);
   syncBuiltinESMExports();
   t.after(() => {
     Object.defineProperty(process, "platform", platform);
     readFile.mock.restore();
+    probe.mock.restore();
     syncBuiltinESMExports();
   });
   t.mock.method(SandboxManager, "initialize", async () => {});
@@ -126,7 +132,20 @@ test("Linux adapter applies socket overrides without claiming network isolation"
     assert.equal(args[4]?.allowAllNetwork, false);
     assert.equal(args[4]?.allowAllUnixSockets, !socket);
     assert.equal(args[4]?.networkProxy, undefined);
+    assert.ok(runtime.traceSinkForCommand(`linux-${socket}`), "Linux filesystem observer is active for either socket mode");
   }
+});
+
+test("Linux missing strace fails closed before sandbox initialization", async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+  const readFile = t.mock.method(fs, "readFile", async () => "ID=debian\n");
+  const probe = t.mock.method(childProcess, "execFile", ((...args: any[]) => { args.at(-1)(new Error("strace unavailable")); return {}; }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  t.after(() => { Object.defineProperty(process, "platform", platform); readFile.mock.restore(); probe.mock.restore(); syncBuiltinESMExports(); });
+  const initialize = t.mock.method(SandboxManager, "initialize", async () => {});
+  await assert.rejects(AnthropicSandboxRuntime.initialize({ cwd: "/fixture", writePolicy: { allow: ["/fixture"], deny: [] } }), /Linux filesystem observation requires working strace/);
+  assert.equal(initialize.mock.callCount(), 0);
 });
 
 test("adapter supplies per-operation overrides and does not create a proxy for network off", async t => {

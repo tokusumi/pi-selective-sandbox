@@ -30,8 +30,9 @@ below apply while enforcement is enabled.
 
 The user may independently run `/selective-sandbox network off|on` and
 `/selective-sandbox socket off|on`. Here `off` temporarily disables the named
-restriction, **not** communication. Both restrictions start on; component `on`
-restores the platform baseline rather than denying all communication. Missing,
+restriction, **not** communication. Network restrictions start on and Unix-socket
+restrictions start off; component `on` enables the platform's available restriction
+rather than denying all communication. Missing,
 extra or unsupported arguments show usage without changing any switch. Argument
 completion includes both component forms and the global on/off forms.
 
@@ -55,7 +56,7 @@ completion includes both component forms and the global on/off forms.
   published before acknowledging success. Bound child commands do not modify
   local or shared state; they direct the user to the owning parent. Other root
   sessions remain independent. Switches are not configuration or grants.
-  Parent reload/restart/session replacement resets them to on and invalidates
+  Parent reload/restart/session replacement resets network on and socket off and invalidates
   old child bindings; child-only reload inherits current parent state. The global
   off switch overrides both component settings; global on preserves them, and
   component on cannot reenable global enforcement.
@@ -174,13 +175,12 @@ For ordinary bash commands:
 3. If sandbox execution succeeds, return its result without approval.
 4. If it fails without a correlated sandbox violation, return that ordinary
    sandbox result without approval.
-5. If it has a violation but this invocation did not explicitly request
-   `retryOnSandboxDenial: true`, return the original result, observed violations,
-   and `retryNotRequested: true`. Do not prepare scopes or call the approval
-   provider (including stored host-grant lookup). Correlation is not causality
-   or retry intent. Observation and cleanup still run.
-6. Only with explicit retry intent, apply the capability policy and request
-   approval when policy permits asking. The intent flag never grants authority.
+5. If `retryOnSandboxDenial: false` was explicitly supplied, return the original
+   result and observations without scope preparation, approval, or replay.
+6. Otherwise apply the capability policy and request approval when policy permits.
+   Both an omitted flag and explicit `true` permit reuse of eligible stored
+   approvals. Correlation does not prove causality; approval does not imply the
+   denial caused the exit.
 7. If any filesystem-write candidate intersects a configured deny root, do not
    offer sandbox-capability approval: deny rules would make the retry
    ineffective. The approval surface may offer exact-command host replay only.
@@ -192,19 +192,17 @@ For ordinary bash commands:
 9. A host-command response replays the exact command on the host.
 
 The replacement bash schema exposes optional boolean `retryOnSandboxDenial`,
-with a default of false. The library accepts it in the fourth argument to
+with a default of true. The lower-level
+executor accepts retry intent explicitly in the fourth argument to
 `execute(command, toolCallId, toolName, options)`; only literal true opts in.
-It is not remembered across invocations. This intentionally changes the old
-nonzero-plus-denial automatic approval behavior, including resource retry.
-Existing stored resource grants are still applied on the first attempt; existing
-host grants are matched in their original order only after retry was requested.
-No command-name, output-text or exit-code classifier is used; nonzero status is
-never rewritten to success. A later opted-in invocation executes in the sandbox
-again before considering that invocation's denials, and can repeat side effects.
+Intent is not remembered across invocations. Existing stored resource grants
+are still applied on the first attempt. No command-name, output-text or exit-code
+classifier is used; nonzero status is never rewritten to success. Every approved
+retry runs the entire command again and can repeat side effects.
 
 ### Resource approval interaction
 
-For opted-in retries with supported write candidates, interactive TUI approval separates the observed
+For retries with supported write candidates, interactive TUI approval separates the observed
 blocked targets from the initial capability scopes (including prepared Git and
 directory-entry scopes), the selected write scopes, duration, and command.
 The initial selection is each prepared scope and `Once`. The user can choose
@@ -274,7 +272,7 @@ exit/output. `details.selectiveSandbox` reports disposition, denialObserved and
 retryNotRequested as closed observation facts, not a causal diagnosis or grant.
 The standard structured exit code and nonzero error flag are preserved. Safe
 session records distinguish this as `retry / skipped / not-requested`.
-For opted-in retries, before requesting approval for a detected violation, the extension streams
+For eligible retries, before requesting approval for a detected violation, the extension streams
 `<sandbox: approval-required filesystem.write>` (or the detected capability
 kind; for mixed denials the marker names the first kind, while the approval
 prompt discloses all observed targets). Approval then streams `<sandbox: approved widen retry>`,
@@ -304,10 +302,11 @@ are diagnostic-only and available on process stderr through
 or interrupted monitor instead adds a short `<sandbox: observation-unavailable>`
 warning; it never infers a permission, offers approval, disables enforcement, or
 replays on the host. An apparently running monitor is not proof of complete OS
-telemetry. The adapter retains a bounded one-second post-exit wait for delayed
-supported denials and finishes immediately if one is already available or arrives.
-Command names, nonzero exit codes, unrelated invocations, and unsupported events
-must not bypass or shorten observation.
+telemetry. The adapter collects delayed supported denials for a bounded one-second
+post-exit window, even if another denial has already arrived. Collection overflow
+fails without approval. This does not guarantee complete OS log delivery. Command
+names, nonzero exit codes, unrelated invocations, and unsupported events must not
+bypass or shorten observation.
 
 The command has already been attempted before a replay choice; each retry can
 repeat side effects permitted before the violation. A command with a write on
@@ -447,7 +446,7 @@ retries and native children sharing an already initialized SDK. It is independen
 of destination profiles, local-binding settings, and stored grants. Linux is
 unchanged.
 
-This does not enable arbitrary Mach lookup, Unix sockets, direct external
+This certificate allowance does not itself enable arbitrary Mach lookup, Unix sockets, direct external
 TCP/UDP, or the SDK's broader `enableWeakerNetworkIsolation` switch. The command's
 proxy endpoint policy and filesystem policy remain in force. The OS trust daemon
 is part of the trusted host boundary: certificate-related activity it performs
@@ -462,7 +461,7 @@ baseline services at SDK startup and on every invocation, including retries and
 native children sharing an SDK. They are independent of destination profiles,
 local-binding settings and stored grants. Linux is unchanged.
 
-No arbitrary Mach or Unix-socket allowance is added. Direct filesystem deny
+These Mach allowances do not themselves add arbitrary Mach or Unix-socket access. Direct filesystem deny
 rules remain enforced; daemon RPC is a separate trusted boundary, including the
 root-only FSEvents history purge operation. The confidentiality, privileged-RPC
 and root-execution risks are documented in
@@ -495,8 +494,7 @@ Raw socket denials in that mode do not become guessed listener-port approvals;
 existing exact-endpoint proxy grants and exact-command host replay remain separate.
 
 This permission does not enable direct external egress, grant filesystem access,
-authorize host replay, or allow Unix sockets. macOS Unix-socket isolation remains
-unchanged. Linux ignores the local-binding option: network isolation is unsupported,
+authorize host replay, or itself allow Unix sockets. Unix-socket restrictions are separately controlled and default off. Linux ignores the local-binding option: network isolation is unsupported,
 and Ubuntu's separate `allowAllUnixSockets` behavior remains unchanged. Invalid
 configuration disables local binding as well as clearing the proxy allowlist.
 
@@ -665,8 +663,8 @@ No mtime/size cache or file watcher is used.
 
 | Platform | Filesystem | Network isolation | Unix sockets | Fail closed |
 | --- | --- | --- | --- | --- |
-| macOS | Isolated | External egress isolated; local networking allowed by default | Isolated | Yes |
-| Other Linux | Isolated | Not supported | Isolated | Yes |
+| macOS | Isolated | External egress isolated; local networking allowed by default | Unrestricted by default; opt-in isolation | Yes |
+| Other Linux | Isolated | Not supported | Unrestricted by default; opt-in isolation | Yes |
 | Ubuntu | Isolated | Not supported | Unrestricted | Yes |
 
 Ubuntu is detected from `ID=ubuntu` in `/etc/os-release`, regardless of version,
@@ -678,8 +676,10 @@ filesystem sandbox widening, or the approval model. It is not host replay;
 filesystem sandboxing continues inside Bubblewrap. Network isolation is supported
 only on macOS, not Linux.
 
-Because `allowAllUnixSockets` skips upstream seccomp observation, Ubuntu
-uses `strace` around Bubblewrap for filesystem telemetry. The tracer's stderr
+Because `allowAllUnixSockets` skips upstream seccomp observation, all Linux
+attempts use `strace` around Bubblewrap for filesystem telemetry, regardless of
+socket mode. Startup requires a working `/usr/bin/strace` with the runner's
+arguments; failure blocks sandbox execution rather than running on the host. The tracer's stderr
 pipe belongs to the extension process; the traced command's stderr is routed
 to normal command output before Bubblewrap starts. The observer ignores
 Bubblewrap setup syscalls, follows the workload and descendants, and reports
@@ -774,13 +774,13 @@ failures fall back to ordinary sandbox execution, not automatic host execution.
   ```text
   try sandbox → success: done
               → ordinary failure: done
-              → violation, no retry intent: original result + observation
-              → violation + retry intent + matching host grant: host replay
+              → violation, explicit retry opt-out: original result + observation
+              → violation + retry enabled + matching host grant: host replay
   ```
 
-- Stored host grants never skip directly to host or initiate a retry. No
-  approval provider or scope preparation runs without per-invocation retry
-  intent, even when a matching host grant exists.
+- Stored host grants never skip directly to host before a sandbox attempt.
+  An explicit per-invocation retry opt-out prevents scope preparation, approval
+  lookup, and replay, even when a matching grant exists.
 - Resource grants authorize sandbox widening only; host grants authorize exact
   host replay only.
 - Canonical resources and canonical cwd are used for reusable grant matching;

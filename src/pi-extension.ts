@@ -29,7 +29,7 @@ import { ProjectHostCommandGrantStore } from "./project-host-command-grants.js";
 import { resolveProjectIdentityInfo } from "./project-identity.js";
 import { SessionGrantStore } from "./session-grants.js";
 import { SessionHostCommandGrantStore } from "./session-host-command-grants.js";
-import type { SandboxSwitches } from "./session-switches.js";
+import { DEFAULT_SANDBOX_SWITCHES, type SandboxSwitches } from "./session-switches.js";
 import type { ApprovalProvider, ApprovalRequest, ApprovalResponse, Capability, CommandResult, CommandRunner, ExecutionResult, SkillAuthority } from "./types.js";
 
 const debug = debuglog("pi-selective-sandbox");
@@ -147,8 +147,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
   if (sessionAuditEnabled && diagnostics) sessionAudit = createSessionAuditSink((type, data) => pi.appendEntry(type, data), diagnostics.originId);
   const subagents = createSubagentSupport(pi, { entryPath: fileURLToPath(import.meta.url), loadApi: options.loadSubagentApi, diagnostics });
   const commandNamespace = randomUUID();
-  let enabled = true;
-  const restrictions = { network: true, socket: true };
+  let enabled = DEFAULT_SANDBOX_SWITCHES.enabled;
+  const restrictions = { network: DEFAULT_SANDBOX_SWITCHES.network, socket: DEFAULT_SANDBOX_SWITCHES.socket };
   let monitorDisabled = false;
   let monitorWarningShown = false;
   let switchUpdates = Promise.resolve();
@@ -202,8 +202,8 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
           : target === "socket" && process.platform === "linux"
             ? " Ubuntu's baseline leaves Unix sockets unrestricted." : "";
         context.ui.notify(mode === "off"
-          ? `${scope} restrictions disabled for subsequent bash operations in this session and its native subagents; access is allowed. Filesystem restrictions are unchanged. Use /selective-sandbox ${target} on to restore the baseline.${platformNote}`
-          : `${scope} restrictions restored to the platform baseline for subsequent bash operations in this session and its native subagents.${platformNote}${enabled ? "" : " Sandbox enforcement is still off; use /selective-sandbox on to enable it."}`,
+          ? `${scope} restrictions disabled for subsequent bash operations in this session and its native subagents; access is allowed. Filesystem restrictions are unchanged. Use /selective-sandbox ${target} on to enable restrictions.${platformNote}`
+          : `${scope} restrictions enabled for subsequent bash operations in this session and its native subagents.${platformNote}${enabled ? "" : " Sandbox enforcement is still off; use /selective-sandbox on to enable it."}`,
           mode === "off" ? "warning" : "info");
         return;
       }
@@ -312,15 +312,15 @@ export default async function selectiveSandboxExtension(pi: ExtensionAPI, option
     ...localBash,
     parameters: Type.Object({
       ...localBash.parameters.properties,
-      retryOnSandboxDenial: Type.Optional(Type.Boolean({ description: "Request the existing approval/retry flow after a correlated sandbox denial (default false). Not permission or proof of causality. The entire command may run again and repeat side effects." }))
+      retryOnSandboxDenial: Type.Optional(Type.Boolean({ description: "Allow approval/retry after a correlated sandbox denial (default true). Set false when repeating the entire command is inappropriate. Saved approvals may be reused; the command may run again and repeat side effects." }))
     }),
-    description: localBash.description + " Nonzero exits are returned unchanged, not diagnosed as sandbox failures. Correlated denials do not trigger approval or replay unless retryOnSandboxDenial is explicitly true.",
+    description: localBash.description + " Nonzero exits are not diagnosed as sandbox failures. Correlated denials can trigger approval by default; set retryOnSandboxDenial false to return without approval or replay. Approval may repeat the entire command.",
     promptGuidelines: [
       "For bash, inspect the command exit code and output separately from observed sandbox denials; correlation does not establish why a command exited.",
-      "Use bash retryOnSandboxDenial only when repeating the whole command to address denied access is appropriate, never merely because an exit is nonzero or a normal application state is still pending. Retry intent does not grant permission."
+      "Set bash retryOnSandboxDenial to false when repeating the whole command would be inappropriate, including normal pending states. Approval does not establish causality and a retry may repeat earlier side effects."
     ],
     async execute(id, params, signal, onUpdate, context) {
-      const retryOnSandboxDenial = params.retryOnSandboxDenial === true;
+      const retryOnSandboxDenial = params.retryOnSandboxDenial === undefined || params.retryOnSandboxDenial === true;
       const operationRestrictions = await operationSwitches(context);
       if (!await enabledForOperation(operationRestrictions, context)) {
         const hostBash = createBashTool(cwd, { operations: { exec: (command, commandCwd, opts) => runCommand(localOperations, command, commandCwd, opts) } });

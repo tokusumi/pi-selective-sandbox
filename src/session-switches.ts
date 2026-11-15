@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { readBridgeJson, writeBridgeJson, validBridgeBinding, type ApprovalBridgeBinding } from "./subagent-approval.js";
 
 export type SandboxSwitches = { enabled: boolean; network: boolean; socket: boolean };
-export const DEFAULT_SANDBOX_SWITCHES: Readonly<SandboxSwitches> = { enabled: true, network: true, socket: true };
+export const DEFAULT_SANDBOX_SWITCHES: Readonly<SandboxSwitches> = { enabled: true, network: true, socket: false };
 const FILE = "switches.json";
 
 async function checkOwner(binding: ApprovalBridgeBinding): Promise<void> {

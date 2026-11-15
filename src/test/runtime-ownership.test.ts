@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { SandboxManager, SandboxViolationStore } from "@anthropic-ai/sandbox-runtime";
 import { AnthropicSandboxRuntime, sandboxCommandKey } from "../runtime-adapter.js";
 
 test("disposing one foreground child preserves sibling SDK state and violation attribution", async t => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { ...platform, value: "linux" });
-  t.after(() => Object.defineProperty(process, "platform", platform));
+  const probe = t.mock.method(childProcess, "execFile", ((...args: any[]) => { args.at(-1)(null, "", ""); return {}; }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  t.after(() => { Object.defineProperty(process, "platform", platform); probe.mock.restore(); syncBuiltinESMExports(); });
   t.mock.method(SandboxManager, "initialize", async () => {});
   const reset = t.mock.method(SandboxManager, "reset", async () => {});
   const store = new SandboxViolationStore();

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import fs from "node:fs/promises";
 import http from "node:http";
-import { execFile } from "node:child_process";
+import childProcess, { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -62,10 +62,12 @@ test("Linux does not enable the SDK startup-policy monitor", async t => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { ...platform, value: "linux" });
   const readFile = t.mock.method(fs, "readFile", async () => "ID=debian\n");
+  const probe = t.mock.method(childProcess, "execFile", ((...args: any[]) => { args.at(-1)(null, "", ""); return {}; }) as typeof childProcess.execFile);
   syncBuiltinESMExports();
   t.after(() => {
     Object.defineProperty(process, "platform", platform);
     readFile.mock.restore();
+    probe.mock.restore();
     syncBuiltinESMExports();
   });
   const initialize = t.mock.method(SandboxManager, "initialize", async () => {});
@@ -175,7 +177,9 @@ test("socket creation and Mach denials are diagnostic-only, correlated, and neve
   }
   record("mixed", "helper(123) deny(1) mach-lookup example.service");
   record("mixed", "helper(123) deny(1) network-outbound /fixture/local.sock");
-  assert.equal((await runtime.getViolationsForCommand("mixed"))[0].resource, "/fixture/local.sock");
+  const mixed = runtime.getViolationsForCommand("mixed");
+  t.mock.timers.tick(1000);
+  assert.equal((await mixed)[0].resource, "/fixture/local.sock");
   assert.deepEqual(runtime.getObservationDiagnostic("mixed")?.communicationDenials, [{ operation: "mach-lookup", target: "example.service" }]);
 });
 
@@ -219,9 +223,48 @@ test("macOS waits for the matching SDK event, not another invocation", async t =
   await Promise.resolve();
   assert.equal(settled, false, "even late matching denials retain the full observation window");
   record("git-add", "git(123) deny(1) file-write-create /repo/.git/index.lock");
+  t.mock.timers.tick(1);
   const violations = await pending;
   assert.equal(violations[0].resource, "/repo/.git/index.lock");
   assert.equal(listeners, 0);
+});
+
+test("macOS collects a later file denial even when a network denial arrives first", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  record("go-install", "go(123) deny(1) network-outbound 203.0.113.1:443");
+  let settled = false;
+  const pending = runtime.getViolationsForCommand("go-install").then(result => { settled = true; return result; });
+  t.mock.timers.tick(500);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  record("go-install", "go(123) deny(1) file-write-create /Users/test/go/bin/protoc-gen-go");
+  record("other", "go(456) deny(1) file-write-create /unrelated");
+  t.mock.timers.tick(500);
+  const violations = await pending;
+  assert.deepEqual(violations.map(v => v.kind), ["network", "filesystem.write"]);
+  assert.equal(violations[1].resource, "/Users/test/go/bin/protoc-gen-go");
+});
+
+test("macOS retains observed denials even when other commands evict them from the shared store", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  record("target", "go(123) deny(1) file-write-create /outside/file");
+  record("target", "go(123) deny(1) mach-lookup example.service");
+  const pending = runtime.getViolationsForCommand("target");
+  for (let i = 0; i < 110; i++) record(`other-${i}`, `bash(999) deny(1) file-write-create /other/${i}`);
+  t.mock.timers.tick(1000);
+  assert.equal((await pending)[0].resource, "/outside/file");
+  assert.deepEqual(runtime.getObservationDiagnostic("target")?.communicationDenials, [{ operation: "mach-lookup", target: "example.service" }]);
+});
+
+test("macOS refuses approval when the bounded denial collection overflows", async t => {
+  const { runtime, record } = await macOSFixture(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = runtime.getViolationsForCommand("target");
+  const rejection = assert.rejects(pending, /denial collection limit exceeded; approval was not attempted/);
+  for (let i = 0; i <= 1000; i++) record("target", `go(123) deny(1) file-write-create /outside/${i}`);
+  await rejection;
 });
 
 test("macOS ordinary failures stop waiting and release the subscription", async t => {

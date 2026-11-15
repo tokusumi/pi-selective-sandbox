@@ -1,6 +1,6 @@
 # pi-selective-sandbox
 
-`pi-selective-sandbox` is a Pi extension that keeps command execution sandboxed by default and separates command results, observed sandbox denials, and explicitly requested retries. **Sandbox by default. Escalate by exception.**
+`pi-selective-sandbox` is a Pi extension that keeps command execution sandboxed by default and separates command results, observed sandbox denials, and retry approval. **Sandbox by default. Escalate by exception.**
 
 > [!WARNING]
 > **This project is under early development.**
@@ -14,7 +14,7 @@ Pi can need access beyond a project's normal writable area, but an ordinary comm
 
 ## How it works
 
-Normal `bash` commands run in the OS sandbox first and return their original exit code and output. A nonzero exit plus a correlated sandbox denial does not prove that the denial caused the exit. Approval/retry is offered only when that invocation explicitly sets `retryOnSandboxDenial: true`; the flag is intent, not permission. Native `write` and `edit` operations retain preflight resource boundaries before they read or mutate a target.
+Normal `bash` commands run in the OS sandbox first. A nonzero exit plus a correlated sandbox denial does not prove that the denial caused the exit. By default an approval is offered where supported, or an existing approval is reused; an approved retry reruns the entire command. Set `retryOnSandboxDenial: false` when repetition is inappropriate. Native `write` and `edit` operations retain preflight resource boundaries before they read or mutate a target.
 
 The full behavioral and security contract is in [SPEC.md](SPEC.md).
 
@@ -35,8 +35,8 @@ For `bash`:
 sandbox
    ↓
 nonzero exit + observed denial
-   ├─ no retry intent (default) → return original result + observation
-   └─ retryOnSandboxDenial: true → existing approvals below
+   ├─ retryOnSandboxDenial: false → return original result + observation
+   └─ default or retryOnSandboxDenial: true → approvals below
           ├─ Allow resource in sandbox
           │      → once / session / project
           │
@@ -44,27 +44,19 @@ nonzero exit + observed denial
                  → once / session / project
 ```
 
-Stored host-command grants do not bypass sandbox-first execution or initiate retry. The command is still tried in the sandbox first; host replay requires both explicit retry intent for that invocation and an eligible host approval after a sandbox violation.
+Stored host-command grants do not bypass sandbox-first execution. Both default behavior and explicit `retryOnSandboxDenial: true` reuse eligible stored approvals after an observed denial.
 
 ### Retry intent (compatibility change)
 
-`retryOnSandboxDenial` defaults to `false`. A nonzero result with observed denials returns `<sandbox: denial-observed retry-not-requested>` without approval, widening, or host replay. Pi's exit code and nonzero error flag stay unchanged; callers must interpret the command's own status contract rather than assuming a sandbox failure. CI pending, for example, remains a wait state, not a reason to replay on host; actual failed checks and API/authentication failures remain visible.
-
-If repeating the command to address denied access is appropriate, explicitly opt in for that invocation:
-
-```json
-{ "command": "some-tool operation", "retryOnSandboxDenial": true }
-```
-
-Existing approval rules still apply. Do not set the flag on every call. A later opted-in call starts with another sandbox attempt, not a continuation of the previous one; it and any approved retry can repeat earlier side effects. See [the execution contract](SPEC.md#5-bash-execution-flow).
+`retryOnSandboxDenial` defaults to `true` in the registered bash tool. A nonzero exit with an observed denial can offer approval or reuse an existing grant, but does not establish causality. To return the original result without approval or replay when repetition would be inappropriate (for example a normal CI pending state), set `retryOnSandboxDenial: false`. Explicit `true` and an omitted flag both permit reuse of stored grants. Approval and replay repeat the entire command and can repeat side effects. See [the execution contract](SPEC.md#5-bash-execution-flow).
 
 ### Resource approval UI
 
-For an opted-in bash retry after a filesystem-write violation, the approval screen separates **Blocked target**, **Allow access to**, **Duration**, and **Command**. Select the initial scope or any of its parent directories, then choose `Once`, `This session`, or `This project` when eligible, and confirm with `Allow and retry`. It starts with the initial scope and `Once`. Paths cannot be typed freely; candidates follow the canonical ancestor chain all the way to `/`, without special treatment for HOME.
+For a bash retry after a filesystem-write violation, the approval screen separates **Blocked target**, **Allow access to**, **Duration**, and **Command**. Select the initial scope or any of its parent directories, then choose `Once`, `This session`, or `This project` when eligible, and confirm with `Allow and retry`. It starts with the initial scope and `Once`. Paths cannot be typed freely; candidates follow the canonical ancestor chain all the way to `/`, without special treatment for HOME.
 
 A directory selection allows writes beneath that directory, including unrelated siblings of the blocked target. Selecting `/` displays an explicit whole-filesystem warning. Existing configured and SDK deny rules still apply, even with a broad scope. Git metadata and directory-entry operations retain their required initial scopes, which can differ from the observed leaf; the screen shows both. Selecting a parent of shared Git metadata remains once-only.
 
-Use `Tab` / `Shift+Tab` to move between fields, arrow keys to select, and `Enter` to continue or confirm. `Esc` denies. The selected path is displayed in full below the candidate list. If several scopes are needed, each has its own ancestor selection. RPC clients use successive scope, duration, and confirmation selectors rather than a custom terminal screen. Headless execution still denies requests that have no eligible stored grant.
+Use `Tab` / `Shift+Tab` to move between fields, arrow keys to select, and `Enter` to continue or confirm. `Esc` denies. The selected path is displayed in full below the candidate list. If several scopes are needed, each has its own ancestor selection. RPC clients use successive scope, duration, and confirmation selectors rather than a custom terminal screen. Headless execution denies requests without an eligible stored grant.
 
 `Run outside sandbox…` opens a separate host-duration and exact-command confirmation. It does not approve the selected resource. For a new Git Project approval, the confirmation shows the canonical cwd relative to the worktree root. Reuse requires that same relative cwd in the main/linked worktrees; other directories and descendants are not approved. Execution stays in the caller's cwd. Relative paths, local scripts, configuration and repository content can change the command's effects across worktrees. Choose Once or Session if that broader trust is inappropriate. Both resource retry and host replay rerun the entire command and can repeat earlier side effects. Native `write` / `edit` retain their exact-target preflight approval UI; ancestor selection is for bash sandbox widening. Both screens explain this difference; the native screen names the canonical target and explains that no eligible exact grant matches.
 
@@ -121,11 +113,9 @@ Toggle these restrictions independently without disabling filesystem enforcement
 | `/selective-sandbox network off` | Allow unrestricted IP traffic on macOS, bypassing the destination allowlist and sandbox proxy |
 | `/selective-sandbox network on` | Restore the configured network baseline and eligible endpoint grants |
 | `/selective-sandbox socket off` | Allow all Unix-domain sockets |
-| `/selective-sandbox socket on` | Restore the platform's Unix-socket baseline |
+| `/selective-sandbox socket on` | Enable the platform's Unix-socket restrictions where supported |
 
-Here **off disables the restriction**, not communication. Both switches start
-on in the owning parent and reset when that parent reloads, replaces its session
-or restarts. All three switches propagate to its new and existing native
+Here **off disables the restriction**, not communication. Network restrictions start on; Unix-socket restrictions start **off**. Both reset to these defaults when the owning parent reloads, replaces its session or restarts. All three switches propagate to its new and existing native
 subagents, including nested/retained children, at the next `bash`/`write`/`edit`
 operation. Change switches in the owning parent; bound children cannot override
 them. Temporary state is shared through the protected parent-session transport,
@@ -133,6 +123,8 @@ not configuration or approvals. Each bash operation, including its retries,
 keeps the snapshot it started with; existing processes are not revoked or changed. The global `/selective-sandbox off` overrides both switches;
 global `on` preserves their individual settings. Component `on` does not enable
 global enforcement when it is off.
+
+**Security:** Unix sockets are unrestricted by default. A reachable host service can act outside the sandbox, including reading secrets, relaying network traffic, or modifying files; direct filesystem and IP restrictions do not contain those effects. Use `socket on` where that isolation is required and supported.
 
 Network-off allows direct TCP/UDP, DNS, private/LAN destinations and listeners
 on any interface; it adds no arbitrary Mach-service permission. Inherited user
@@ -206,7 +198,7 @@ sandbox configuration or failed discovery grant no helper authority.
 System certificate verification works by default, including `gh` and Go HTTPS
 clients. Every macOS attempt permits the exact `com.apple.trustd.agent` Mach
 service; no extra approval or host replay is needed for certificate verification.
-This does not allow arbitrary Mach services or Unix sockets, change the endpoint
+This does not allow arbitrary Mach services, change the endpoint
 allowlist, or disable TLS verification. The OS certificate-validation daemon is
 trusted infrastructure: its own certificate-related network activity is outside
 the command's proxy policy. This baseline also applies with local binding disabled
@@ -229,14 +221,14 @@ the external allowlist; localhost is a trusted boundary in this mode.
 on all interfaces, so bind test/dev servers explicitly to `127.0.0.1` or `::1`
 to avoid LAN exposure. IPv4-mapped IPv6 loopback connects are not matched by
 Seatbelt; the SDK forces Java's IPv4 stack, but other clients may need native
-IPv4 or IPv6 loopback sockets. Unix sockets remain restricted on macOS.
+IPv4 or IPv6 loopback sockets. Unix sockets are unrestricted by default; use `/selective-sandbox socket on` to restrict them on macOS.
 
 Set `network.allowLocalBinding` to `false` to restore the proxy-only local TCP
 policy. This is independent of destination profiles; disabling all destination profiles
 does not disable local networking. There is no listener port allowlist or per-port
 approval flow. This option does not change Linux behavior.
 
-When a proxy-aware command reaches a blocked destination and retry was explicitly requested, the approval prompt
+When a proxy-aware command reaches a blocked destination and retry is enabled, the approval prompt
 shows the exact `host:port`, asks for once, session, or project duration, and
 then offers **Allow and retry**. Endpoints are fixed; unlike filesystem write
 scopes, they cannot be expanded to ancestors. The retry stays in the sandbox; filesystem
@@ -387,8 +379,8 @@ The sandbox runtime also owns a small set of operational housekeeping paths such
 
 | Platform | Filesystem | Network | Unix sockets |
 | --- | --- | --- | --- |
-| macOS | Isolated | External egress isolated; local networking allowed by default | Isolated |
-| Other Linux | Isolated | Not supported | Isolated |
+| macOS | Isolated | External egress isolated; local networking allowed by default | Unrestricted by default; opt-in isolation |
+| Other Linux | Isolated | Not supported | Unrestricted by default; opt-in isolation |
 | Ubuntu | Isolated | Not supported | Unrestricted |
 
 On macOS, SDK log monitoring is explicitly enabled. SDK stream events supply
@@ -419,8 +411,8 @@ is outside the supported feature contract.
 On the tested Ubuntu 24.04 host, restrictive AppArmor policy blocks the nested
 user namespace that the runtime's Unix-socket isolation would require.
 
-Ubuntu also requires `strace` as its filesystem violation observer. The
-extension checks `strace` availability and basic ptrace operation at startup.
+Linux requires `/usr/bin/strace` as its filesystem violation observer, including when socket restrictions are enabled. The
+extension checks strace availability, required arguments, and basic ptrace operation at startup.
 It traces the Bubblewrap command, ignores Bubblewrap setup calls, and
 attributes only failed write syscalls with `EROFS` against the existing write
 policy. Trace data is carried on a parent-owned pipe; command output uses a
@@ -455,7 +447,7 @@ Sandbox grant identity remains capability plus exact canonical resource. Host ap
 
 Project identity is the canonical Git base directory: normally the main worktree, or the metadata directory for bare repositories and `--separate-git-dir` layouts. Symlink aliases normalize to the same identity. Outside Git, it is the canonical startup cwd. New relative-cwd host grants require successful Git discovery at startup **and** fresh matching Git identity, canonical worktree root and canonical cwd at lookup/save time; cwd fallback is not Git proof. The coordinate is derived after resolving symlinks (`.` for the root). Bare repositories' linked worktrees support this matching; the bare directory itself and metadata-only directories have no worktree root, so new approvals there remain exact-cwd. Discovery ignores inherited `GIT_*` overrides without changing the command's execution environment. Another repo, separate clone, Git-outside cwd, failed discovery or a different relative cwd cannot reuse a relative-cwd host grant.
 
-**Execution cwd is never rewritten to the project base.** A fixed command such as `sh /trusted/fixed.sh` approved in `worktree-A/src` can replay from `worktree-B/src`, but not `worktree-A/tests`, `worktree-B/tests`, either worktree root or `src/child`. Root approval (`.`) likewise does not approve subdirectories. Trust extends only to corresponding directories across worktrees: relative paths, local executables/scripts, config and repository content can still differ and cause different host effects. Command text is not a content hash or an environment/argument wildcard. This is operation authority, not a containment boundary on paths the approved command itself accesses. Sandbox-first, explicit retry intent and an observed denial are still required on every invocation; resource grants remain separate.
+**Execution cwd is never rewritten to the project base.** A fixed command such as `sh /trusted/fixed.sh` approved in `worktree-A/src` can replay from `worktree-B/src`, but not `worktree-A/tests`, `worktree-B/tests`, either worktree root or `src/child`. Root approval (`.`) likewise does not approve subdirectories. Trust extends only to corresponding directories across worktrees: relative paths, local executables/scripts, config and repository content can still differ and cause different host effects. Command text is not a content hash or an environment/argument wildcard. This is operation authority, not a containment boundary on paths the approved command itself accesses. Sandbox-first execution and an observed denial are still required; default and explicit retry both permit reuse. Resource grants remain separate.
 
 **Compatibility:** v1 grants and v2 `exact-cwd` grants retain exact-cwd matching when carried into the v3 store; they are never automatically expanded. To share a coordinate across worktrees, explicitly approve Project after a miss in another worktree (or revoke and reapprove). The earlier overly broad v2 `git-project` grants are rejected and require fresh approval, not automatically converted using their historical cwd. New host writes use version 3 with explicit `exact-cwd` / `git-worktree-relative` scopes; the latter requires `relativeCwd`. Older extensions reject v3. Update/reload all writers before saving approvals: an old writer may overwrite v3 and lose approvals. Once/Session and the resource-store format are unchanged. Existing worktree-keyed project IDs are not migrated to the shared base; moving or cloning a repository does not inherit grants. See [SPEC.md §8–10](SPEC.md#8-hostcommandgrant) for storage, freshness and snapshot limits.
 
